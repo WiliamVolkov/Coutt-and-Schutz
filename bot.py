@@ -24,6 +24,9 @@ USED_VEHICLES_CHANNEL_ID = 1560447325912961214
 IMPORTED_VEHICLES_CHANNEL_ID = 1560447082060447835
 WELCOME_CHANNEL_ID = 1558770818433949769
 
+# Canal donde el bot publica la invitación permanente del servidor.
+INVITE_CHANNEL_ID = 1560801851467759708
+
 # Sistema de verificación.
 VERIFICATION_CHANNEL_ID = 1560779383055327262
 VERIFIED_ROLE_ID = 1558774898103685131
@@ -1287,6 +1290,172 @@ async def ensure_ticket_panel():
 
 
 # ============================================================
+# INVITACIÓN PERMANENTE
+# ============================================================
+
+INVITE_CODE_RE = re.compile(
+    r"(?:discord\.gg|discord\.com/invite)/([A-Za-z0-9-]+)"
+)
+
+# Código de la invitación permanente vigente.
+current_invite_code = None
+
+
+class InvitePanelView(discord.ui.LayoutView):
+    def __init__(self, code):
+        super().__init__(timeout=None)
+
+        url = f"https://discord.gg/{code}"
+
+        container = discord.ui.Container(accent_colour=PANEL_COLOR)
+
+        container.add_item(header_block(
+            "# 🔗 ÚNETE A COUTT & SCHUTZ\n"
+            "### Invitación oficial al servidor\n"
+            "-# Enlace permanente"
+        ))
+        container.add_item(discord.ui.Separator(
+            spacing=discord.SeparatorSpacing.large
+        ))
+
+        container.add_item(discord.ui.TextDisplay(
+            "Comparte este enlace con tus amigos para que se unan a "
+            "nuestra comunidad y descubran nuestro catálogo de vehículos "
+            "usados e importados."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            f"> 🔗 **{url}**\n"
+            "> ♾️ No caduca y no tiene límite de usos."
+        ))
+        container.add_item(discord.ui.ActionRow(
+            discord.ui.Button(
+                label="Unirme al servidor",
+                emoji="🚗",
+                url=url
+            )
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            "-# 🏁 Coutt & Schutz  ·  Enlace oficial"
+        ))
+
+        self.add_item(container)
+
+
+def find_invite_code(components):
+    """Busca de forma recursiva un enlace de invitación en los botones."""
+    for component in components:
+        url = getattr(component, "url", None)
+
+        if isinstance(url, str):
+            match = INVITE_CODE_RE.search(url)
+            if match:
+                return match.group(1)
+
+        children = getattr(component, "children", None)
+        if children:
+            code = find_invite_code(children)
+            if code:
+                return code
+
+    return None
+
+
+async def ensure_invite_panel():
+    """
+    Publica (o actualiza) el mensaje con la invitación permanente.
+    Reutiliza la invitación existente mientras siga siendo válida y crea
+    una nueva solo si fue eliminada.
+    """
+    global current_invite_code
+
+    channel = bot.get_channel(INVITE_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(INVITE_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception("No se pudo acceder al canal de invitación.")
+            return
+
+    try:
+        existing = None
+        code = None
+
+        async for message in channel.history(limit=50):
+            if message.author.id != bot.user.id:
+                continue
+
+            found = find_invite_code(message.components)
+            if not found:
+                continue
+
+            if existing is None:
+                existing, code = message, found
+            else:
+                # Eliminar mensajes duplicados.
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+
+        # Comprobar que la invitación guardada sigue existiendo.
+        if code is not None:
+            try:
+                await bot.fetch_invite(code)
+            except discord.NotFound:
+                logger.warning("La invitación %s ya no existe.", code)
+                code = None
+            except discord.HTTPException:
+                # No se pudo comprobar: se conserva la actual.
+                pass
+
+        # Crear una invitación permanente nueva si hace falta.
+        if code is None:
+            invite = await channel.create_invite(
+                max_age=0,      # nunca caduca
+                max_uses=0,     # sin límite de usos
+                temporary=False,
+                unique=True,
+                reason="Invitación permanente del servidor"
+            )
+            code = invite.code
+            logger.info("Invitación permanente creada: %s", code)
+
+        current_invite_code = code
+        view = InvitePanelView(code)
+
+        if existing is not None:
+            await existing.edit(view=view)
+            logger.info("Panel de invitación actualizado.")
+        else:
+            await channel.send(view=view)
+            logger.info("Panel de invitación publicado.")
+
+    except discord.Forbidden:
+        logger.error(
+            "No se pudo configurar la invitación. Comprueba que el bot "
+            "tenga los permisos Crear invitación, Ver canal, Enviar "
+            "mensajes y Leer historial en el canal."
+        )
+    except discord.HTTPException:
+        logger.exception("Error al configurar la invitación permanente.")
+
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite):
+    # Si borran la invitación permanente, se crea otra automáticamente.
+    if invite.code == current_invite_code:
+        logger.warning(
+            "La invitación permanente fue eliminada. Creando otra..."
+        )
+        await ensure_invite_panel()
+
+
+# ============================================================
 # BIENVENIDA AUTOMÁTICA
 # ============================================================
 
@@ -1560,6 +1729,7 @@ async def on_ready():
     await ensure_panel()
     await ensure_ticket_panel()
     await ensure_verification_panel()
+    await ensure_invite_panel()
 
 
 def main():
