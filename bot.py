@@ -913,6 +913,22 @@ class TicketControlView(discord.ui.LayoutView):
         self.add_item(container)
 
 
+def ticket_channel_name(member):
+    """
+    Nombre del canal del ticket a partir del apodo del miembro
+    (o su nombre visible si no tiene apodo). Discord no permite
+    espacios ni mayúsculas en canales de texto, así que
+    "Tyrell Simmons" queda como "tyrell-simmons".
+    """
+
+    def clean(text):
+        text = re.sub(r"\s+", "-", text.strip().lower())
+        text = re.sub(r"[^\w\-]", "", text)  # quitar emojis y símbolos
+        return text.strip("-_")[:90]
+
+    return clean(member.display_name) or clean(member.name) or "ticket"
+
+
 class OpenTicketButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -976,7 +992,7 @@ class OpenTicketButton(discord.ui.Button):
 
         try:
             channel = await guild.create_text_channel(
-                name=f"ticket-{member.name}"[:90],
+                name=ticket_channel_name(member),
                 category=category,
                 overwrites=overwrites,
                 topic=topic,
