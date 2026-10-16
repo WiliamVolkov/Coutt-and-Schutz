@@ -35,9 +35,8 @@ PANEL_COLOR = discord.Colour.from_rgb(255, 140, 0)      # naranja (panel)
 # Categorías predefinidas que se pueden elegir en el formulario
 # (máximo 25). Formato: (nombre, emoji).
 VEHICLE_CATEGORIES = [
-    ("Exclusivos", "💎"),
-    ("Super-Deportivos", "🏎️"),
-    ("Deportivos", "🚗"),
+    ("Deportivos", "🏎️"),
+    ("Sedanes", "🚗"),
     ("Camionetas", "🛻"),
     ("Motocicletas", "🏍️"),
 ]
