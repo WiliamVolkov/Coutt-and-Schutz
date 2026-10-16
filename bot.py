@@ -1,18 +1,32 @@
+
 import os
 from threading import Thread
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
 from flask import Flask
 from dotenv import load_dotenv
 
-# Cargar variables de entorno
+# ==========================================
+# CONFIGURACIÓN
+# ==========================================
+
 load_dotenv()
 
-# Token configurado en Render
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Servidor web para Render
+CANAL_PANEL_ID = 1560513189438029935
+CANAL_USADOS_ID = 1560447325912961214
+CANAL_IMPORTADOS_ID = 1560447082060447835
+
+COLOR_EMBED = discord.Color.dark_blue()
+MARCA_PANEL = "COUTT_SCHUTZ_PANEL_V1"
+
+# ==========================================
+# SERVIDOR WEB PARA RENDER
+# ==========================================
+
 app = Flask(__name__)
 
 
@@ -30,7 +44,10 @@ def keep_alive():
     Thread(target=run_web, daemon=True).start()
 
 
-# Configuración del bot
+# ==========================================
+# CONFIGURACIÓN DEL BOT
+# ==========================================
+
 intents = discord.Intents.default()
 intents.members = True
 
@@ -39,46 +56,340 @@ bot = commands.Bot(
     intents=intents
 )
 
-# Canal de bienvenida
-CANAL_BIENVENIDA_ID = 1558770818433949769
+panel_inicializado = False
+
+
+def es_administrador(interaction: discord.Interaction) -> bool:
+    return (
+        interaction.guild is not None
+        and interaction.user.guild_permissions.administrator
+    )
+
+
+async def obtener_canal(canal_id: int):
+    canal = bot.get_channel(canal_id)
+
+    if canal is None:
+        canal = await bot.fetch_channel(canal_id)
+
+    return canal
+
+
+# ==========================================
+# FORMULARIO DE PUBLICACIÓN
+# ==========================================
+
+class FormularioVehiculo(discord.ui.Modal):
+
+    def __init__(self, tipo: str, canal_destino_id: int):
+        super().__init__(
+            title=f"Publicar vehículo {tipo}"
+        )
+
+        self.tipo = tipo
+        self.canal_destino_id = canal_destino_id
+
+        self.nombre = discord.ui.TextInput(
+            label="Nombre del vehículo",
+            placeholder="Ej.: Pegassi Zentorno",
+            required=True,
+            max_length=100
+        )
+
+        self.precio = discord.ui.TextInput(
+            label="Precio del vehículo",
+            placeholder="Ej.: $ 250.000",
+            required=True,
+            max_length=50
+        )
+
+        self.descripcion = discord.ui.TextInput(
+            label="Descripción (opcional)",
+            placeholder="Información adicional del vehículo",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=1000
+        )
+
+        self.imagen = discord.ui.TextInput(
+            label="URL de imagen (opcional)",
+            placeholder="https://ejemplo.com/vehiculo.png",
+            required=False,
+            max_length=400
+        )
+
+        self.add_item(self.nombre)
+        self.add_item(self.precio)
+        self.add_item(self.descripcion)
+        self.add_item(self.imagen)
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        # Comprobar permisos al enviar el formulario
+        if not es_administrador(interaction):
+            await interaction.response.send_message(
+                "No tienes permiso para publicar vehículos.",
+                ephemeral=True
+            )
+            return
+
+        nombre = self.nombre.value.strip()
+        precio = self.precio.value.strip()
+        descripcion = self.descripcion.value.strip()
+        imagen_url = self.imagen.value.strip()
+
+        if not nombre or not precio:
+            await interaction.response.send_message(
+                "El nombre y el precio son obligatorios.",
+                ephemeral=True
+            )
+            return
+
+        # Validar la URL de la imagen si se proporcionó
+        if imagen_url:
+            parsed_url = urlparse(imagen_url)
+
+            if (
+                parsed_url.scheme not in ("http", "https")
+                or not parsed_url.netloc
+            ):
+                await interaction.response.send_message(
+                    "La URL de la imagen no es válida. "
+                    "Utiliza una dirección que empiece por "
+                    "https:// o http://.",
+                    ephemeral=True
+                )
+                return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            canal = await obtener_canal(self.canal_destino_id)
+
+            embed = discord.Embed(
+                title=nombre,
+                color=COLOR_EMBED
+            )
+
+            embed.add_field(
+                name="Precio",
+                value=precio,
+                inline=False
+            )
+
+            if descripcion:
+                embed.description = descripcion
+
+            if imagen_url:
+                embed.set_image(url=imagen_url)
+
+            embed.set_footer(
+                text=f"Coutt-and-Schutz | Vehículos {self.tipo}"
+            )
+
+            await canal.send(embed=embed)
+
+            await interaction.followup.send(
+                f"Vehículo publicado correctamente en "
+                f"el canal de vehículos {self.tipo}.",
+                ephemeral=True
+            )
+
+            print(
+                f"Publicación realizada: {nombre} | "
+                f"Precio: {precio} | Tipo: {self.tipo}"
+            )
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "No tengo permisos para publicar en ese canal. "
+                "Comprueba los permisos del bot.",
+                ephemeral=True
+            )
+
+        except discord.HTTPException as error:
+            print(f"Error de Discord al publicar: {error}")
+
+            await interaction.followup.send(
+                "Discord no permitió publicar el vehículo. "
+                "Revisa los registros del bot.",
+                ephemeral=True
+            )
+
+        except Exception as error:
+            print(f"Error inesperado al publicar: {error}")
+
+            await interaction.followup.send(
+                "Ocurrió un error inesperado al publicar.",
+                ephemeral=True
+            )
+
+
+# ==========================================
+# PANEL PERMANENTE DE PUBLICACIONES
+# ==========================================
+
+class PanelPublicaciones(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Publicar vehículo usado",
+        style=discord.ButtonStyle.primary,
+        emoji="🚗",
+        custom_id="coutt:publicar_usado"
+    )
+    async def publicar_usado(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if not es_administrador(interaction):
+            await interaction.response.send_message(
+                "Solo los administradores pueden utilizar este panel.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(
+            FormularioVehiculo(
+                tipo="usados",
+                canal_destino_id=CANAL_USADOS_ID
+            )
+        )
+
+    @discord.ui.button(
+        label="Publicar vehículo importado",
+        style=discord.ButtonStyle.success,
+        emoji="🚘",
+        custom_id="coutt:publicar_importado"
+    )
+    async def publicar_importado(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        if not es_administrador(interaction):
+            await interaction.response.send_message(
+                "Solo los administradores pueden utilizar este panel.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(
+            FormularioVehiculo(
+                tipo="importados",
+                canal_destino_id=CANAL_IMPORTADOS_ID
+            )
+        )
+
+
+def crear_embed_panel():
+    embed = discord.Embed(
+        title="Coutt-and-Schutz | Panel de vehículos",
+        description=(
+            "Utiliza los botones de abajo para publicar vehículos "
+            "en el canal correspondiente.\n\n"
+            "🚗 **Vehículos usados:** publica en el canal de usados.\n"
+            "🚘 **Vehículos importados:** publica en el canal "
+            "de importados.\n\n"
+            "El nombre y el precio son obligatorios. "
+            "La descripción y la imagen son opcionales.\n\n"
+            "Solo los administradores del servidor pueden utilizar "
+            "este panel."
+        ),
+        color=COLOR_EMBED
+    )
+
+    embed.set_footer(text=MARCA_PANEL)
+
+    return embed
+
+
+# ==========================================
+# INICIO Y RECUPERACIÓN DEL PANEL
+# ==========================================
+
+async def asegurar_panel():
+    global panel_inicializado
+
+    if panel_inicializado:
+        return
+
+    try:
+        canal = await obtener_canal(CANAL_PANEL_ID)
+
+        panel_existente = None
+
+        # Buscar el panel reciente para reutilizarlo
+        async for mensaje in canal.history(limit=200):
+            if (
+                bot.user is not None
+                and mensaje.author.id == bot.user.id
+                and any(
+                    embed.footer.text == MARCA_PANEL
+                    for embed in mensaje.embeds
+                    if embed.footer
+                )
+            ):
+                panel_existente = mensaje
+                break
+
+        vista = PanelPublicaciones()
+
+        if panel_existente is not None:
+            await panel_existente.edit(
+                embed=crear_embed_panel(),
+                view=vista
+            )
+
+            print(
+                f"Panel existente recuperado: "
+                f"{panel_existente.id}"
+            )
+
+        else:
+            mensaje = await canal.send(
+                embed=crear_embed_panel(),
+                view=vista
+            )
+
+            print(f"Panel creado: {mensaje.id}")
+
+        panel_inicializado = True
+
+    except discord.Forbidden:
+        print(
+            "ERROR: faltan permisos para consultar el historial "
+            "o enviar mensajes en el canal del panel."
+        )
+
+    except discord.HTTPException as error:
+        print(f"No se pudo inicializar el panel: {error}")
+
+
+@bot.event
+async def setup_hook():
+    # Registrar los botones persistentes antes de recibir interacciones
+    bot.add_view(PanelPublicaciones())
 
 
 @bot.event
 async def on_ready():
     print(f"Bot conectado como {bot.user}")
+    await asegurar_panel()
 
 
-@bot.event
-async def on_member_join(member):
-    canal = bot.get_channel(CANAL_BIENVENIDA_ID)
+# ==========================================
+# ARRANQUE
+# ==========================================
 
-    if canal is None:
-        try:
-            canal = await bot.fetch_channel(CANAL_BIENVENIDA_ID)
-        except discord.HTTPException as error:
-            print(f"No se pudo encontrar el canal de bienvenida: {error}")
-            return
-
-    mensaje = (
-        f"🚗 ¡Bienvenido/a a Coutt-and-Schutz, {member.mention}! 🎉\n\n"
-        f"Nos alegra tenerte por aquí. Te invitamos a visitar "
-        f"nuestro concesionario y descubrir nuestros vehículos.\n\n"
-        f"¡Esperamos que encuentres el vehículo de tus sueños!"
-    )
-
-    try:
-        await canal.send(mensaje)
-        print(f"Bienvenida enviada para {member} ({member.id})")
-    except discord.HTTPException as error:
-        print(f"No se pudo enviar la bienvenida: {error}")
-
-
-# Inicio del programa
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
-            "Falta la variable de entorno DISCORD_TOKEN. "
-            "Configúrala en Render."
+            "Falta DISCORD_TOKEN. Configura la variable "
+            "de entorno en Render."
         )
 
     keep_alive()
