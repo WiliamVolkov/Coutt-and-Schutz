@@ -196,6 +196,10 @@ def parse_vehicle_message(message):
     for text in texts:
         text = text.strip()
 
+        # Textos pequeños decorativos (cabecera y pie de la publicación).
+        if text.startswith("-#"):
+            continue
+
         if text.startswith("## ") and name is None:
             name = text[3:].strip()
             continue
