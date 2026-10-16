@@ -1326,15 +1326,7 @@ class InvitePanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Separator())
 
         container.add_item(discord.ui.TextDisplay(
-            f"> 🔗 **{url}**\n"
-            "> ♾️ No caduca y no tiene límite de usos."
-        ))
-        container.add_item(discord.ui.ActionRow(
-            discord.ui.Button(
-                label="Unirme al servidor",
-                emoji="🚗",
-                url=url
-            )
+            f"> 🔗 **{url}**"
         ))
         container.add_item(discord.ui.Separator())
 
