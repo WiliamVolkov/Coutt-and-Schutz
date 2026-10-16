@@ -37,6 +37,9 @@ TICKET_PANEL_CHANNEL_ID = 1560447380636176525
 # Categoría donde se crean los tickets (opcional). Si es None, se
 # crean en la misma categoría del canal del panel de tickets.
 TICKET_CATEGORY_ID = None
+# Rol de los trabajadores de la concesionaria: se menciona al abrir un
+# ticket, puede ver el canal y puede cerrarlo.
+TICKET_STAFF_ROLE_ID = 1558775758904893501
 TICKET_OPEN_ID = "coutt_schutz:ticket_open"
 TICKET_CLOSE_ID = "coutt_schutz:ticket_close"
 TICKET_TOPIC_PREFIX = "ticket:"  # el tema del canal guarda el ID del dueño
@@ -865,11 +868,17 @@ class CloseTicketButton(discord.ui.Button):
             except ValueError:
                 owner_id = None
 
+        is_staff = any(
+            role.id == TICKET_STAFF_ROLE_ID
+            for role in getattr(interaction.user, "roles", [])
+        )
+
         if not (is_admin(interaction.user)
+                or is_staff
                 or interaction.user.id == owner_id):
             await interaction.response.send_message(
-                "Solo el creador del ticket o un administrador "
-                "puede cerrarlo.",
+                "Solo el creador del ticket o el personal de la "
+                "concesionaria puede cerrarlo.",
                 ephemeral=True
             )
             return
@@ -885,7 +894,7 @@ class CloseTicketButton(discord.ui.Button):
 class TicketControlView(discord.ui.LayoutView):
     """Mensaje de bienvenida dentro del canal del ticket."""
 
-    def __init__(self, owner=None):
+    def __init__(self, owner=None, staff_role_id=None):
         super().__init__(timeout=None)
 
         if owner is not None:
@@ -903,9 +912,16 @@ class TicketControlView(discord.ui.LayoutView):
 
         container.add_item(discord.ui.TextDisplay(
             "Describe tu consulta con el mayor detalle posible. "
-            "Un administrador te atenderá en breve.\n\n"
-            "-# Solo tú y los administradores podéis ver este canal."
+            "Un miembro del equipo te atenderá en breve.\n\n"
+            "-# Solo tú y el equipo de la concesionaria podéis ver este canal."
         ))
+
+        if staff_role_id:
+            container.add_item(discord.ui.TextDisplay(
+                f"🔔 <@&{staff_role_id}>, hay un nuevo ticket pendiente "
+                "de atención."
+            ))
+
         container.add_item(discord.ui.Separator())
 
         container.add_item(discord.ui.ActionRow(CloseTicketButton()))
@@ -990,6 +1006,23 @@ class OpenTicketButton(discord.ui.Button):
             ),
         }
 
+        # Los trabajadores de la concesionaria también ven y escriben.
+        staff_role = guild.get_role(TICKET_STAFF_ROLE_ID)
+
+        if staff_role is None:
+            logger.warning(
+                "No se encontró el rol de trabajadores ID %s",
+                TICKET_STAFF_ROLE_ID
+            )
+        else:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True
+            )
+
         try:
             channel = await guild.create_text_channel(
                 name=ticket_channel_name(member),
@@ -999,7 +1032,16 @@ class OpenTicketButton(discord.ui.Button):
                 reason=f"Ticket abierto por {member}"
             )
 
-            await channel.send(view=TicketControlView(member))
+            await channel.send(
+                view=TicketControlView(
+                    member,
+                    staff_role.id if staff_role else None
+                ),
+                allowed_mentions=discord.AllowedMentions(
+                    users=[member],
+                    roles=[staff_role] if staff_role else False
+                )
+            )
 
         except discord.Forbidden:
             logger.error(
@@ -1051,8 +1093,8 @@ class TicketPanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Section(
             discord.ui.TextDisplay(
                 "### 📩 Abrir un ticket\n"
-                "Se creará un canal privado solo para ti y los "
-                "administradores."
+                "Se creará un canal privado solo para ti y el equipo "
+                "de la concesionaria."
             ),
             accessory=OpenTicketButton()
         ))
