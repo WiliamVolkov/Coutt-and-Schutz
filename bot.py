@@ -219,7 +219,7 @@ class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
         label="Nombre y apellido de tu personaje",
         placeholder="Ejemplo: Juan_Perez",
         min_length=3,
-        max_length=50,
+        max_length=32,  # límite de Discord para los apodos
         required=True
     )
 
@@ -262,6 +262,8 @@ class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         try:
             await member.add_roles(
                 verified_role,
@@ -279,7 +281,7 @@ class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
                 "No se pudieron cambiar los roles de verificación. "
                 "Comprueba la jerarquía de roles y el permiso Gestionar roles."
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No pude asignarte los roles. Avisa a un administrador para que "
                 "revise los permisos y la posición del rol del bot.",
                 ephemeral=True
@@ -287,16 +289,47 @@ class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
             return
         except discord.HTTPException:
             logger.exception("Error de Discord al asignar roles de verificación.")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Ocurrió un error al verificarte. Inténtalo de nuevo en unos momentos.",
                 ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
-            f"✅ Verificación completada. Se te asignó el rol {verified_role.mention}.",
-            ephemeral=True
+        # Cambiar el apodo a "Nombre Apellido" (sin guion bajo).
+        nickname = submitted_name.replace("_", " ")
+        nickname_changed = False
+
+        try:
+            await member.edit(
+                nick=nickname,
+                reason="Verificación completada: apodo con el nombre RP"
+            )
+            nickname_changed = True
+        except discord.Forbidden:
+            logger.warning(
+                "No se pudo cambiar el apodo de %s. Comprueba el permiso "
+                "Gestionar apodos y que el rol del bot esté por encima del "
+                "del miembro (el dueño del servidor no se puede modificar).",
+                member
+            )
+        except discord.HTTPException:
+            logger.exception("Error de Discord al cambiar el apodo.")
+
+        message = (
+            f"✅ Verificación completada. Se te asignó el rol "
+            f"{verified_role.mention}."
         )
+
+        if nickname_changed:
+            message += f"\nTu apodo ahora es **{nickname}**."
+        else:
+            message += (
+                "\n⚠️ No pude cambiar tu apodo automáticamente. "
+                "Avisa a un administrador."
+            )
+
+        await interaction.followup.send(message, ephemeral=True)
+
         logger.info(
             "Miembro verificado: %s (%s), nombre RP: %s",
             member,
