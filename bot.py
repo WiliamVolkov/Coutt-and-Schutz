@@ -59,4 +59,4 @@ async def testbienvenida(ctx):
 
 # Iniciar servidor web y bot
 keep_alive()
-bot.run(MTU2MDQ0MzAyMzM1ODE3MzI2NA.GXEcDm.S2WHiMCqBYKoLSHKXwqLAT9lqSX2XwOCbuJzuk)
+bot.run("MTU2MDQ0MzAyMzM1ODE3MzI2NA.GXEcDm.S2WHiMCqBYKoLSHKXwqLAT9lqSX2XwOCbuJzuk")
