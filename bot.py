@@ -109,10 +109,11 @@ async def descargar_y_ajustar_imagen(url: str):
         ) as response:
 
             if response.status != 200:
-                raise ValueError(
-                    "No se pudo descargar la imagen. "
-                    "Comprueba que el enlace sea público."
-                )
+    raise ValueError(
+        f"El servidor de imágenes respondió HTTP "
+        f"{response.status}. Comprueba el enlace "
+        f"o prueba con otra imagen."
+    )
 
             content_type = response.headers.get(
                 "Content-Type", ""
