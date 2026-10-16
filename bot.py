@@ -116,13 +116,16 @@ class CouttSchutzBot(commands.Bot):
         await setup_ai(
             self,
             USED_VEHICLES_CHANNEL_ID,
-            IMPORTED_VEHICLES_CHANNEL_ID
+            IMPORTED_VEHICLES_CHANNEL_ID,
+            ticket_channel_id=TICKET_PANEL_CHANNEL_ID,
+            categories=[name for name, _ in VEHICLE_CATEGORIES]
         )
 
 
 bot = CouttSchutzBot(
     command_prefix="!",
-    intents=intents
+    intents=intents,
+    help_command=None  # sin comandos por prefijo: todo va por menciones y /
 )
 
 
