@@ -52,7 +52,9 @@ REQUEST_TIMEOUT = 600
 # Color de la barra lateral de cada publicación.
 COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
 COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
-PANEL_COLOR = discord.Colour.from_rgb(255, 140, 0)      # naranja (panel)
+PANEL_COLOR = discord.Colour.from_rgb(212, 175, 55)     # dorado (panel)
+WELCOME_COLOR = discord.Colour.from_rgb(212, 175, 55)   # dorado (bienvenida)
+CLOSE_COLOR = discord.Colour.from_rgb(237, 66, 69)      # rojo (cierre)
 TICKET_COLOR = discord.Colour.from_rgb(88, 101, 242)    # azul (tickets)
 VERIFICATION_COLOR = discord.Colour.from_rgb(46, 204, 113)
 
@@ -141,6 +143,48 @@ def is_admin(member):
         isinstance(member, discord.Member)
         and member.guild_permissions.administrator
     )
+
+
+# ============================================================
+# IDENTIDAD VISUAL
+# ============================================================
+
+# Emoji de cada categoría, tomado de VEHICLE_CATEGORIES.
+CATEGORY_EMOJIS = {name: emoji for name, emoji in VEHICLE_CATEGORIES}
+
+
+def category_emoji(name):
+    return CATEGORY_EMOJIS.get(name, "🚗")
+
+
+def logo_url():
+    """Logo de la concesionaria (el avatar del bot), si está disponible."""
+    if bot.user is None:
+        return None
+    return bot.user.display_avatar.url
+
+
+def header_block(text):
+    """Cabecera con el logo a la derecha (o solo texto si no hay logo)."""
+    logo = logo_url()
+
+    if logo:
+        return discord.ui.Section(
+            discord.ui.TextDisplay(text),
+            accessory=discord.ui.Thumbnail(media=logo)
+        )
+
+    return discord.ui.TextDisplay(text)
+
+
+def notice_view(title, body, colour):
+    """Mensaje breve con estilo de contenedor (avisos y confirmaciones)."""
+    container = discord.ui.Container(accent_colour=colour)
+    container.add_item(discord.ui.TextDisplay(f"### {title}\n{body}"))
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
 
 
 # ============================================================
@@ -318,20 +362,26 @@ class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
         except discord.HTTPException:
             logger.exception("Error de Discord al cambiar el apodo.")
 
-        message = (
-            f"✅ Verificación completada. Se te asignó el rol "
-            f"{verified_role.mention}."
-        )
-
         if nickname_changed:
-            message += f"\nTu apodo ahora es **{nickname}**."
+            body = (
+                f"Se te asignó el rol {verified_role.mention}.\n"
+                f"Tu apodo ahora es **{nickname}**."
+            )
         else:
-            message += (
-                "\n⚠️ No pude cambiar tu apodo automáticamente. "
+            body = (
+                f"Se te asignó el rol {verified_role.mention}.\n"
+                "⚠️ No pude cambiar tu apodo automáticamente. "
                 "Avisa a un administrador."
             )
 
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(
+            view=notice_view(
+                "✅ ¡Verificación completada!",
+                body,
+                VERIFICATION_COLOR
+            ),
+            ephemeral=True
+        )
 
         logger.info(
             "Miembro verificado: %s (%s), nombre RP: %s",
@@ -377,23 +427,44 @@ class VerificationPanelView(discord.ui.LayoutView):
         super().__init__(timeout=None)
 
         container = discord.ui.Container(accent_colour=VERIFICATION_COLOR)
-        container.add_item(discord.ui.TextDisplay(
+
+        container.add_item(header_block(
             "# ✅ VERIFICACIÓN\n"
-            "-# Coutt-and-Schutz | Acceso al servidor"
+            "### Bienvenido a Coutt & Schutz\n"
+            "-# Acceso al servidor"
         ))
         container.add_item(discord.ui.Separator(
             spacing=discord.SeparatorSpacing.large
         ))
+
         container.add_item(discord.ui.TextDisplay(
-            "Para acceder al resto del servidor, debes verificar el nombre de tu "
-            "personaje de rol.\n\n"
-            "**Formato obligatorio:** `Nombre_Apellido`\n"
-            "**Ejemplo válido:** `Juan_Perez`\n\n"
-            "Usa únicamente letras y un solo guion bajo entre el nombre y el "
-            "apellido. No se permiten espacios ni números."
+            "Para acceder al resto del servidor necesitas verificar "
+            "el nombre de tu personaje de rol."
         ))
         container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.ActionRow(StartVerificationButton()))
+
+        container.add_item(discord.ui.TextDisplay(
+            "> 📝 **Formato:** `Nombre_Apellido`\n"
+            "> ✔️ **Ejemplo:** `Juan_Perez`\n\n"
+            "Usa únicamente letras y un solo guion bajo entre el nombre "
+            "y el apellido. No se permiten espacios ni números."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.Section(
+            discord.ui.TextDisplay(
+                "### 🔑 Verificarme\n"
+                "Pulsa el botón y completa el formulario. Tu apodo se "
+                "actualizará automáticamente a tu nombre."
+            ),
+            accessory=StartVerificationButton()
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            "-# 🏁 Coutt & Schutz  ·  Acceso al servidor"
+        ))
+
         self.add_item(container)
 
 
@@ -445,40 +516,56 @@ async def ensure_verification_panel():
 # ============================================================
 
 def build_vehicle_view(name, price, description, category,
-                       type_label, vehicle_type, filename):
+                       vehicle_type, filename, ticket_url=None):
     """
     Crea la publicación con estilo de contenedor:
-    barra de color lateral, separadores, cita y galería de imagen.
+    barra de color, título, descripción, precio destacado, imagen
+    grande y un botón para consultar por el vehículo.
     Requiere discord.py >= 2.6.
     """
 
     accent = COLOR_USED if vehicle_type == "used" else COLOR_IMPORTED
+    published = int(datetime.now(timezone.utc).timestamp())
 
     container = discord.ui.Container(accent_colour=accent)
 
-    # Título grande.
-    container.add_item(
-        discord.ui.TextDisplay(f"## {name.upper()}")
-    )
+    # Cabecera y título.
+    container.add_item(discord.ui.TextDisplay(
+        "-# 🏁 COUTT & SCHUTZ  ·  EN VENTA"
+    ))
+    container.add_item(discord.ui.TextDisplay(f"## {name.upper()}"))
     container.add_item(discord.ui.Separator())
 
     # Descripción.
     container.add_item(discord.ui.TextDisplay(description))
     container.add_item(discord.ui.Separator())
 
-    # Bloque de cita con precio y categoría.
-    container.add_item(
-        discord.ui.TextDisplay(
-            f"> 💰 **Precio:** {price}\n"
-            f"> 🏷️ **Categoría:** {category}"
-        )
-    )
-    container.add_item(discord.ui.Separator())
+    # Precio destacado y categoría.
+    container.add_item(discord.ui.TextDisplay(
+        f"### 💰 **Precio:** {price}\n"
+        f"{category_emoji(category)} **Categoría:** {category}"
+    ))
 
     # Imagen grande.
     gallery = discord.ui.MediaGallery()
     gallery.add_item(media=f"attachment://{filename}")
     container.add_item(gallery)
+
+    # Pie con la fecha de publicación.
+    container.add_item(discord.ui.TextDisplay(
+        f"-# 🏁 Coutt & Schutz  ·  Publicado el <t:{published}:D>"
+    ))
+
+    # Botón para consultar por el vehículo (lleva al canal de tickets).
+    if ticket_url:
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.ActionRow(
+            discord.ui.Button(
+                label="Consultar este vehículo",
+                emoji="📩",
+                url=ticket_url
+            )
+        ))
 
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
@@ -583,16 +670,20 @@ class VehicleModal(discord.ui.Modal):
             "created_at": datetime.now(timezone.utc).timestamp()
         }
 
+        category = self.vehicle_category.values[0]
+
         await interaction.response.send_message(
-            f"**Vehículo:** {self.vehicle_name.value}\n"
-            f"**Categoría:** {self.vehicle_category.values[0]}\n"
-            f"**Precio:** {self.vehicle_price.value}\n\n"
-            f"Ahora entra en <#{PANEL_CHANNEL_ID}> y envía "
-            "la fotografía como archivo adjunto en un mensaje "
-            "normal.\n\n"
-            "Puedes seleccionar la imagen directamente desde tu PC. "
-            "La solicitud caduca en 10 minutos. Una vez publicada "
-            "la imagen, el bot intentará eliminar el mensaje temporal.",
+            view=notice_view(
+                "📸 Último paso: adjunta la fotografía",
+                f"**Vehículo:** {self.vehicle_name.value}\n"
+                f"**Categoría:** {category_emoji(category)} {category}\n"
+                f"**Precio:** {self.vehicle_price.value}\n\n"
+                f"Entra en <#{PANEL_CHANNEL_ID}> y envía la fotografía "
+                "como archivo adjunto en un mensaje normal.\n"
+                "-# ⏱️ La solicitud caduca en 10 minutos. El bot borrará "
+                "tu mensaje al publicar.",
+                PANEL_COLOR
+            ),
             ephemeral=True
         )
 
@@ -639,10 +730,11 @@ class VehiclePanelView(discord.ui.LayoutView):
 
         container = discord.ui.Container(accent_colour=PANEL_COLOR)
 
-        # Cabecera.
-        container.add_item(discord.ui.TextDisplay(
-            "# 🚗 COUTT & SCHUTZ\n"
-            "-# Sistema de publicación de vehículos"
+        # Cabecera con el logo.
+        container.add_item(header_block(
+            "# 🏁 COUTT & SCHUTZ\n"
+            "### Panel de publicación de vehículos\n"
+            "-# Concesionaria  ·  Solo administradores"
         ))
         container.add_item(discord.ui.Separator(
             spacing=discord.SeparatorSpacing.large
@@ -650,9 +742,9 @@ class VehiclePanelView(discord.ui.LayoutView):
 
         # Instrucciones.
         container.add_item(discord.ui.TextDisplay(
-            "Selecciona el tipo de vehículo que quieres publicar. "
-            "Se abrirá un formulario donde podrás elegir la "
-            "**categoría**, el **precio** y añadir una descripción."
+            "Elige el tipo de vehículo que vas a publicar. Se abrirá un "
+            "formulario para indicar el **nombre**, la **categoría**, el "
+            "**precio** y una **descripción**."
         ))
         container.add_item(discord.ui.Separator())
 
@@ -660,7 +752,7 @@ class VehiclePanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Section(
             discord.ui.TextDisplay(
                 "### 🚘 Vehículos usados\n"
-                "Publica vehículos de segunda mano."
+                "Unidades de segunda mano, listas para entrega."
             ),
             accessory=PublishButton(
                 vehicle_type="used",
@@ -675,7 +767,7 @@ class VehiclePanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Section(
             discord.ui.TextDisplay(
                 "### 🌎 Vehículos importados\n"
-                "Publica vehículos importados."
+                "Modelos exclusivos traídos del exterior."
             ),
             accessory=PublishButton(
                 vehicle_type="imported",
@@ -689,21 +781,22 @@ class VehiclePanelView(discord.ui.LayoutView):
 
         # Categorías y pasos.
         container.add_item(discord.ui.TextDisplay(
-            f"> 🏷️ **Categorías disponibles**\n"
+            "> 🏷️ **Categorías disponibles**\n"
             f"> {categories}"
         ))
         container.add_item(discord.ui.TextDisplay(
-            "**¿Cómo funciona?**\n"
-            "**1.** Pulsa el botón del tipo de vehículo.\n"
-            "**2.** Rellena el formulario.\n"
-            "**3.** Adjunta la fotografía en este canal."
+            "**Cómo publicar**\n"
+            "1️⃣  Pulsa el botón del tipo de vehículo.\n"
+            "2️⃣  Completa el formulario.\n"
+            "3️⃣  Adjunta la fotografía en este canal.\n"
+            "-# La foto se adapta sola al formato 16:9."
         ))
         container.add_item(discord.ui.Separator())
 
         # Pie.
         container.add_item(discord.ui.TextDisplay(
-            "-# 🔒 Panel exclusivo para administradores  •  "
-            "Coutt-and-Schutz"
+            "-# 🔒 Panel exclusivo para administradores  ·  "
+            "🏁 Coutt & Schutz"
         ))
 
         self.add_item(container)
@@ -802,32 +895,35 @@ async def ensure_panel():
 # SISTEMA DE TICKETS
 # ============================================================
 
-class CloseTicketConfirmView(discord.ui.View):
-    """Confirmación efímera antes de cerrar el ticket."""
+class ConfirmCloseButton(discord.ui.Button):
+    """Botón de confirmación para cerrar el ticket."""
 
     def __init__(self, channel):
-        super().__init__(timeout=30)
+        super().__init__(
+            label="Sí, cerrar ticket",
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger
+        )
         self.channel = channel
 
-    @discord.ui.button(
-        label="Confirmar cierre",
-        style=discord.ButtonStyle.danger,
-        emoji="🗑️"
-    )
-    async def confirm(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="Cerrando el ticket...",
-            view=None
+            view=notice_view(
+                "🔒 Cerrando ticket",
+                "El canal se eliminará en unos segundos.",
+                CLOSE_COLOR
+            )
         )
 
         try:
             await self.channel.send(
-                f"🔒 Ticket cerrado por {interaction.user.mention}. "
-                "El canal se eliminará en 5 segundos."
+                view=notice_view(
+                    "🔒 Ticket cerrado",
+                    f"Cerrado por {interaction.user.mention}.\n"
+                    "-# El canal se eliminará en 5 segundos.",
+                    CLOSE_COLOR
+                ),
+                allowed_mentions=discord.AllowedMentions.none()
             )
             await asyncio.sleep(5)
             await self.channel.delete(
@@ -845,6 +941,24 @@ class CloseTicketConfirmView(discord.ui.View):
             )
         except discord.HTTPException:
             logger.exception("Error al cerrar el ticket.")
+
+
+class CloseTicketConfirmView(discord.ui.LayoutView):
+    """Confirmación efímera antes de cerrar el ticket."""
+
+    def __init__(self, channel):
+        super().__init__(timeout=30)
+
+        container = discord.ui.Container(accent_colour=CLOSE_COLOR)
+        container.add_item(discord.ui.TextDisplay(
+            "### 🔒 ¿Cerrar este ticket?\n"
+            "El canal se eliminará y no se podrá recuperar."
+        ))
+        container.add_item(discord.ui.ActionRow(
+            ConfirmCloseButton(channel)
+        ))
+
+        self.add_item(container)
 
 
 class CloseTicketButton(discord.ui.Button):
@@ -884,8 +998,6 @@ class CloseTicketButton(discord.ui.Button):
             return
 
         await interaction.response.send_message(
-            "¿Seguro que quieres cerrar este ticket? "
-            "El canal se eliminará.",
             view=CloseTicketConfirmView(channel),
             ephemeral=True
         )
@@ -904,26 +1016,33 @@ class TicketControlView(discord.ui.LayoutView):
 
         container = discord.ui.Container(accent_colour=TICKET_COLOR)
 
-        container.add_item(discord.ui.TextDisplay(
-            "# 🎫 Ticket abierto\n"
-            f"{greeting}Gracias por contactar con **Coutt-and-Schutz**."
+        container.add_item(header_block(
+            "# 🎫 TICKET ABIERTO\n"
+            f"### {greeting}\n"
+            "Bienvenido a **Coutt & Schutz**.\n"
+            "-# Atención al cliente"
         ))
-        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.Separator(
+            spacing=discord.SeparatorSpacing.large
+        ))
 
         container.add_item(discord.ui.TextDisplay(
-            "Describe tu consulta con el mayor detalle posible. "
-            "Un miembro del equipo te atenderá en breve.\n\n"
-            "-# Solo tú y el equipo de la concesionaria podéis ver este canal."
+            "Para atenderte más rápido, cuéntanos:\n"
+            "🚗  El vehículo que te interesa\n"
+            "💰  Tu presupuesto\n"
+            "📝  Cualquier duda o detalle importante\n\n"
+            "-# 🔒 Solo tú y el equipo de la concesionaria podéis ver "
+            "este canal."
         ))
 
         if staff_role_id:
+            container.add_item(discord.ui.Separator())
             container.add_item(discord.ui.TextDisplay(
                 f"🔔 <@&{staff_role_id}>, hay un nuevo ticket pendiente "
                 "de atención."
             ))
 
         container.add_item(discord.ui.Separator())
-
         container.add_item(discord.ui.ActionRow(CloseTicketButton()))
 
         self.add_item(container)
@@ -1063,7 +1182,12 @@ class OpenTicketButton(discord.ui.Button):
             return
 
         await interaction.followup.send(
-            f"✅ Tu ticket ha sido creado: {channel.mention}",
+            view=notice_view(
+                "✅ Ticket creado",
+                f"Tu ticket está listo: {channel.mention}\n"
+                "-# Un miembro del equipo te atenderá en breve.",
+                TICKET_COLOR
+            ),
             ephemeral=True
         )
 
@@ -1076,17 +1200,19 @@ class TicketPanelView(discord.ui.LayoutView):
 
         container = discord.ui.Container(accent_colour=TICKET_COLOR)
 
-        container.add_item(discord.ui.TextDisplay(
-            "# 🎫 SOPORTE\n"
-            "-# Coutt-and-Schutz | Sistema de tickets"
+        container.add_item(header_block(
+            "# 🎫 ATENCIÓN AL CLIENTE\n"
+            "### Coutt & Schutz\n"
+            "-# Concesionaria de vehículos  ·  Ventas y soporte"
         ))
         container.add_item(discord.ui.Separator(
             spacing=discord.SeparatorSpacing.large
         ))
 
         container.add_item(discord.ui.TextDisplay(
-            "¿Necesitas ayuda, quieres consultar un vehículo o tienes "
-            "alguna duda? Abre un ticket y nuestro equipo te atenderá."
+            "¿Quieres comprar un vehículo, consultar un precio o tienes "
+            "alguna duda? Abre un ticket y nuestro equipo te atenderá "
+            "personalmente."
         ))
         container.add_item(discord.ui.Separator())
 
@@ -1101,6 +1227,10 @@ class TicketPanelView(discord.ui.LayoutView):
         container.add_item(discord.ui.Separator())
 
         container.add_item(discord.ui.TextDisplay(
+            "**¿En qué podemos ayudarte?**\n"
+            "🔑  Compra de vehículos\n"
+            "💬  Consultas sobre el catálogo\n"
+            "🛠️  Cualquier otra duda\n"
             "-# Solo puedes tener un ticket abierto a la vez."
         ))
 
@@ -1197,23 +1327,41 @@ async def on_member_join(member: discord.Member):
             )
             return
 
-    embed = discord.Embed(
-        title="¡Bienvenido a Coutt-and-Schutz!",
-        description=(
-            f"¡Hola, {member.mention}! Te damos la bienvenida "
-            "a nuestro servidor.\n\n"
-            "Esperamos que disfrutes de tu estancia."
-        ),
-        color=discord.Color.blue()
-    )
+    container = discord.ui.Container(accent_colour=WELCOME_COLOR)
 
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_footer(text=f"Miembro: {member.name}")
+    container.add_item(discord.ui.Section(
+        discord.ui.TextDisplay(
+            "# 👋 ¡BIENVENIDO!\n"
+            f"### {member.mention}\n"
+            "Te damos la bienvenida a **Coutt & Schutz**, "
+            "tu concesionaria de confianza."
+        ),
+        accessory=discord.ui.Thumbnail(media=member.display_avatar.url)
+    ))
+    container.add_item(discord.ui.Separator(
+        spacing=discord.SeparatorSpacing.large
+    ))
+
+    container.add_item(discord.ui.TextDisplay(
+        f"🔑  **Verifícate** en <#{VERIFICATION_CHANNEL_ID}> para acceder "
+        "al servidor.\n"
+        f"🚘  Descubre los **vehículos usados** en <#{USED_VEHICLES_CHANNEL_ID}>\n"
+        f"🌎  y los **importados** en <#{IMPORTED_VEHICLES_CHANNEL_ID}>.\n"
+        f"🎫  ¿Dudas? Abre un ticket en <#{TICKET_PANEL_CHANNEL_ID}>."
+    ))
+    container.add_item(discord.ui.Separator())
+
+    container.add_item(discord.ui.TextDisplay(
+        f"-# 🏁 Coutt & Schutz  ·  Miembro n.º {member.guild.member_count}"
+    ))
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
 
     try:
         await channel.send(
-            content=member.mention,
-            embed=embed
+            view=view,
+            allowed_mentions=discord.AllowedMentions(users=[member])
         )
     except discord.HTTPException:
         logger.exception("No se pudo enviar la bienvenida.")
@@ -1295,10 +1443,8 @@ async def on_message(message: discord.Message):
                     # Determinar el canal de destino.
                     if request["vehicle_type"] == "used":
                         destination_id = USED_VEHICLES_CHANNEL_ID
-                        type_label = "Vehículo usado"
                     else:
                         destination_id = IMPORTED_VEHICLES_CHANNEL_ID
-                        type_label = "Vehículo importado"
 
                     # Categoría elegida en el formulario.
                     category = request["category"]
@@ -1322,9 +1468,12 @@ async def on_message(message: discord.Message):
                         price=request["price"],
                         description=request["description"],
                         category=category,
-                        type_label=type_label,
                         vehicle_type=request["vehicle_type"],
-                        filename="vehiculo.png"
+                        filename="vehiculo.png",
+                        ticket_url=(
+                            f"https://discord.com/channels/"
+                            f"{message.guild.id}/{TICKET_PANEL_CHANNEL_ID}"
+                        )
                     )
 
                     # Publicar el vehículo.
@@ -1352,8 +1501,16 @@ async def on_message(message: discord.Message):
                     # Confirmación temporal.
                     try:
                         await message.channel.send(
-                            f"✅ Vehículo **{request['name']}** "
-                            f"publicado en <#{destination_id}>.",
+                            view=notice_view(
+                                "✅ Vehículo publicado",
+                                f"**{request['name']}** ya está disponible "
+                                f"en <#{destination_id}>.",
+                                (
+                                    COLOR_USED
+                                    if request["vehicle_type"] == "used"
+                                    else COLOR_IMPORTED
+                                )
+                            ),
                             delete_after=10
                         )
                     except discord.HTTPException:
