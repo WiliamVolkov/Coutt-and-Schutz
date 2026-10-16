@@ -1,5 +1,6 @@
 import os
 import io
+import asyncio
 import logging
 import threading
 from datetime import datetime, timezone
@@ -22,6 +23,15 @@ WELCOME_CHANNEL_ID = 1558770818433949769
 
 PANEL_MARKER = "COUTT_SCHUTZ_VEHICLE_PANEL"
 
+# Sistema de tickets.
+TICKET_PANEL_CHANNEL_ID = 1560447380636176525
+# Categoría donde se crean los tickets (opcional). Si es None, se
+# crean en la misma categoría del canal del panel de tickets.
+TICKET_CATEGORY_ID = None
+TICKET_OPEN_ID = "coutt_schutz:ticket_open"
+TICKET_CLOSE_ID = "coutt_schutz:ticket_close"
+TICKET_TOPIC_PREFIX = "ticket:"  # el tema del canal guarda el ID del dueño
+
 IMAGE_WIDTH = 1600
 IMAGE_HEIGHT = 900
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -31,6 +41,7 @@ REQUEST_TIMEOUT = 600
 COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
 COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
 PANEL_COLOR = discord.Colour.from_rgb(255, 140, 0)      # naranja (panel)
+TICKET_COLOR = discord.Colour.from_rgb(88, 101, 242)    # azul (tickets)
 
 # Categorías predefinidas que se pueden elegir en el formulario
 # (máximo 25). Formato: (nombre, emoji).
@@ -87,6 +98,8 @@ class CouttSchutzBot(commands.Bot):
     async def setup_hook(self):
         # Mantener los botones operativos después de reiniciar.
         self.add_view(VehiclePanelView())
+        self.add_view(TicketPanelView())
+        self.add_view(TicketControlView())
 
 
 bot = CouttSchutzBot(
@@ -199,8 +212,7 @@ def build_vehicle_view(name, price, description, category,
     container.add_item(
         discord.ui.TextDisplay(
             f"> 💰 **Precio:** {price}\n"
-            f"> 🏷️ **Categoría:** {category}\n"
-            f"> 📦 **Tipo:** {type_label}"
+            f"> 🏷️ **Categoría:** {category}"
         )
     )
     container.add_item(discord.ui.Separator())
@@ -443,18 +455,18 @@ class VehiclePanelView(discord.ui.LayoutView):
 # GESTIÓN DEL PANEL
 # ============================================================
 
-def contains_panel_button(components):
+def contains_panel_button(components, ids=PANEL_BUTTON_IDS):
     """Busca de forma recursiva los botones del panel en un mensaje."""
     for component in components:
-        if getattr(component, "custom_id", None) in PANEL_BUTTON_IDS:
+        if getattr(component, "custom_id", None) in ids:
             return True
 
         children = getattr(component, "children", None)
-        if children and contains_panel_button(children):
+        if children and contains_panel_button(children, ids):
             return True
 
         accessory = getattr(component, "accessory", None)
-        if accessory is not None and contains_panel_button([accessory]):
+        if accessory is not None and contains_panel_button([accessory], ids):
             return True
 
     return False
@@ -526,6 +538,309 @@ async def ensure_panel():
         )
     except discord.HTTPException:
         logger.exception("Error al configurar el panel.")
+
+
+# ============================================================
+# SISTEMA DE TICKETS
+# ============================================================
+
+class CloseTicketConfirmView(discord.ui.View):
+    """Confirmación efímera antes de cerrar el ticket."""
+
+    def __init__(self, channel):
+        super().__init__(timeout=30)
+        self.channel = channel
+
+    @discord.ui.button(
+        label="Confirmar cierre",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️"
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await interaction.response.edit_message(
+            content="Cerrando el ticket...",
+            view=None
+        )
+
+        try:
+            await self.channel.send(
+                f"🔒 Ticket cerrado por {interaction.user.mention}. "
+                "El canal se eliminará en 5 segundos."
+            )
+            await asyncio.sleep(5)
+            await self.channel.delete(
+                reason=f"Ticket cerrado por {interaction.user}"
+            )
+            logger.info(
+                "Ticket cerrado: #%s por %s",
+                self.channel.name,
+                interaction.user
+            )
+        except discord.Forbidden:
+            logger.error(
+                "No se pudo eliminar el ticket. "
+                "Falta el permiso Gestionar canales."
+            )
+        except discord.HTTPException:
+            logger.exception("Error al cerrar el ticket.")
+
+
+class CloseTicketButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Cerrar ticket",
+            emoji="🔒",
+            style=discord.ButtonStyle.danger,
+            custom_id=TICKET_CLOSE_ID
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        topic = getattr(channel, "topic", None) or ""
+
+        # Solo el dueño del ticket o un administrador pueden cerrarlo.
+        owner_id = None
+        if topic.startswith(TICKET_TOPIC_PREFIX):
+            try:
+                owner_id = int(topic[len(TICKET_TOPIC_PREFIX):])
+            except ValueError:
+                owner_id = None
+
+        if not (is_admin(interaction.user)
+                or interaction.user.id == owner_id):
+            await interaction.response.send_message(
+                "Solo el creador del ticket o un administrador "
+                "puede cerrarlo.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "¿Seguro que quieres cerrar este ticket? "
+            "El canal se eliminará.",
+            view=CloseTicketConfirmView(channel),
+            ephemeral=True
+        )
+
+
+class TicketControlView(discord.ui.LayoutView):
+    """Mensaje de bienvenida dentro del canal del ticket."""
+
+    def __init__(self, owner=None):
+        super().__init__(timeout=None)
+
+        if owner is not None:
+            greeting = f"¡Hola, {owner.mention}! "
+        else:
+            greeting = ""
+
+        container = discord.ui.Container(accent_colour=TICKET_COLOR)
+
+        container.add_item(discord.ui.TextDisplay(
+            "# 🎫 Ticket abierto\n"
+            f"{greeting}Gracias por contactar con **Coutt-and-Schutz**."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            "Describe tu consulta con el mayor detalle posible. "
+            "Un administrador te atenderá en breve.\n\n"
+            "-# Solo tú y los administradores podéis ver este canal."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.ActionRow(CloseTicketButton()))
+
+        self.add_item(container)
+
+
+class OpenTicketButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Abrir ticket",
+            emoji="📩",
+            style=discord.ButtonStyle.primary,
+            custom_id=TICKET_OPEN_ID
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+
+        if guild is None or not isinstance(member, discord.Member):
+            return
+
+        # Evitar tickets duplicados del mismo usuario.
+        topic = f"{TICKET_TOPIC_PREFIX}{member.id}"
+        existing = discord.utils.find(
+            lambda c: c.topic == topic,
+            guild.text_channels
+        )
+
+        if existing is not None:
+            await interaction.response.send_message(
+                f"Ya tienes un ticket abierto: {existing.mention}",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Categoría donde se creará el ticket.
+        category = None
+        if TICKET_CATEGORY_ID:
+            category = guild.get_channel(TICKET_CATEGORY_ID)
+        if category is None and interaction.channel is not None:
+            category = getattr(interaction.channel, "category", None)
+
+        # Solo el usuario, el bot y los administradores pueden ver
+        # el canal (los administradores ven todo por su permiso).
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False
+            ),
+            member: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                embed_links=True,
+                manage_channels=True
+            ),
+        }
+
+        try:
+            channel = await guild.create_text_channel(
+                name=f"ticket-{member.name}"[:90],
+                category=category,
+                overwrites=overwrites,
+                topic=topic,
+                reason=f"Ticket abierto por {member}"
+            )
+
+            await channel.send(view=TicketControlView(member))
+
+        except discord.Forbidden:
+            logger.error(
+                "No se pudo crear el ticket. "
+                "Falta el permiso Gestionar canales."
+            )
+            await interaction.followup.send(
+                "No pude crear el ticket. Avisa a un administrador.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException:
+            logger.exception("Error al crear el ticket.")
+            await interaction.followup.send(
+                "Ocurrió un error al crear el ticket. "
+                "Inténtalo de nuevo más tarde.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Tu ticket ha sido creado: {channel.mention}",
+            ephemeral=True
+        )
+
+        logger.info("Ticket creado: #%s (%s)", channel.name, member)
+
+
+class TicketPanelView(discord.ui.LayoutView):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        container = discord.ui.Container(accent_colour=TICKET_COLOR)
+
+        container.add_item(discord.ui.TextDisplay(
+            "# 🎫 SOPORTE\n"
+            "-# Coutt-and-Schutz | Sistema de tickets"
+        ))
+        container.add_item(discord.ui.Separator(
+            spacing=discord.SeparatorSpacing.large
+        ))
+
+        container.add_item(discord.ui.TextDisplay(
+            "¿Necesitas ayuda, quieres consultar un vehículo o tienes "
+            "alguna duda? Abre un ticket y nuestro equipo te atenderá."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.Section(
+            discord.ui.TextDisplay(
+                "### 📩 Abrir un ticket\n"
+                "Se creará un canal privado solo para ti y los "
+                "administradores."
+            ),
+            accessory=OpenTicketButton()
+        ))
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            "-# Solo puedes tener un ticket abierto a la vez."
+        ))
+
+        self.add_item(container)
+
+
+async def ensure_ticket_panel():
+    channel = bot.get_channel(TICKET_PANEL_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(TICKET_PANEL_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception(
+                "No se pudo acceder al canal del panel de tickets."
+            )
+            return
+
+    try:
+        current_panel = None
+
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+
+            if contains_panel_button(
+                message.components,
+                {TICKET_OPEN_ID}
+            ):
+                if current_panel is None:
+                    current_panel = message
+                else:
+                    # Eliminar duplicados.
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+
+        if current_panel is not None:
+            await current_panel.edit(view=TicketPanelView())
+            logger.info("Panel de tickets actualizado.")
+            return
+
+        await channel.send(view=TicketPanelView())
+        logger.info("Panel de tickets publicado.")
+
+    except discord.Forbidden:
+        logger.error(
+            "Faltan permisos para leer el historial "
+            "o enviar mensajes en el panel de tickets."
+        )
+    except discord.HTTPException:
+        logger.exception("Error al configurar el panel de tickets.")
 
 
 # ============================================================
@@ -677,14 +992,6 @@ async def on_message(message: discord.Message):
                         filename="vehiculo.png"
                     )
 
-                    # Texto superior. Con Components V2 no se puede
-                    # mezclar "content" con el contenedor, así que
-                    # va en un mensaje aparte.
-                    await destination.send(
-                        f"**{category}** - Coutt-and-Schutz | "
-                        "¡Consultar stock!"
-                    )
-
                     # Publicar el vehículo.
                     await destination.send(
                         view=view,
@@ -759,6 +1066,7 @@ async def on_ready():
     )
 
     await ensure_panel()
+    await ensure_ticket_panel()
 
 
 def main():
