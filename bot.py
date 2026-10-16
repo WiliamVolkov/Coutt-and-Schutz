@@ -1,12 +1,15 @@
 
 import os
+import io
 from threading import Thread
 from urllib.parse import urlparse
 
+import aiohttp
 import discord
 from discord.ext import commands
 from flask import Flask
 from dotenv import load_dotenv
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 # ==========================================
 # CONFIGURACIÓN
@@ -16,15 +19,16 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Canal donde aparecerá el panel de administración
 CANAL_PANEL_ID = 1560513189438029935
-
-# Canales de publicación
 CANAL_USADOS_ID = 1560447325912961214
 CANAL_IMPORTADOS_ID = 1560447082060447835
 
-# Identificador para reconocer el panel existente
 MARCA_PANEL = "COUTT_SCHUTZ_PANEL_V1"
+
+# Tamaño de imagen normalizado: 16:9
+ANCHO_IMAGEN = 1600
+ALTO_IMAGEN = 900
+MAX_IMAGEN_BYTES = 8 * 1024 * 1024
 
 # ==========================================
 # SERVIDOR WEB PARA RENDER
@@ -54,10 +58,7 @@ def keep_alive():
 intents = discord.Intents.default()
 intents.members = True
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
-)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 panel_inicializado = False
 vista_registrada = False
@@ -80,7 +81,119 @@ async def obtener_canal(canal_id: int):
 
 
 # ==========================================
-# FORMULARIO PARA PUBLICAR VEHÍCULOS
+# PROCESAMIENTO DE IMÁGENES
+# ==========================================
+
+async def descargar_y_ajustar_imagen(url: str):
+    """
+    Descarga una imagen y la adapta a un lienzo 16:9.
+    Conserva la imagen completa sin estirar el vehículo.
+    """
+
+    parsed = urlparse(url)
+
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("La URL de imagen no es válida.")
+
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            url,
+            allow_redirects=True
+        ) as response:
+
+            if response.status != 200:
+                raise ValueError(
+                    "No se pudo descargar la imagen. "
+                    "Comprueba que el enlace sea público."
+                )
+
+            content_type = response.headers.get(
+                "Content-Type", ""
+            ).lower()
+
+            if not content_type.startswith("image/"):
+                raise ValueError(
+                    "El enlace no apunta directamente a una imagen."
+                )
+
+            longitud = response.content_length
+
+            if longitud and longitud > MAX_IMAGEN_BYTES:
+                raise ValueError(
+                    "La imagen supera el límite de 8 MB."
+                )
+
+            contenido = await response.content.read(
+                MAX_IMAGEN_BYTES + 1
+            )
+
+            if len(contenido) > MAX_IMAGEN_BYTES:
+                raise ValueError(
+                    "La imagen supera el límite de 8 MB."
+                )
+
+    try:
+        with Image.open(io.BytesIO(contenido)) as original:
+            original.seek(0)
+            original.load()
+
+            imagen = ImageOps.exif_transpose(original)
+            imagen.thumbnail(
+                (ANCHO_IMAGEN, ALTO_IMAGEN),
+                Image.Resampling.LANCZOS
+            )
+
+            # Fondo oscuro para completar el formato horizontal.
+            lienzo = Image.new(
+                "RGB",
+                (ANCHO_IMAGEN, ALTO_IMAGEN),
+                (24, 24, 27)
+            )
+
+            # Centrar la imagen sin deformarla ni recortarla.
+            if imagen.mode in ("RGBA", "LA"):
+                imagen = imagen.convert("RGBA")
+                x = (ANCHO_IMAGEN - imagen.width) // 2
+                y = (ALTO_IMAGEN - imagen.height) // 2
+
+                lienzo.paste(
+                    imagen,
+                    (x, y),
+                    imagen
+                )
+            else:
+                imagen = imagen.convert("RGB")
+                x = (ANCHO_IMAGEN - imagen.width) // 2
+                y = (ALTO_IMAGEN - imagen.height) // 2
+
+                lienzo.paste(imagen, (x, y))
+
+            salida = io.BytesIO()
+            lienzo.save(
+                salida,
+                format="JPEG",
+                quality=92,
+                optimize=True
+            )
+            salida.seek(0)
+
+            return salida
+
+    except (UnidentifiedImageError, OSError) as error:
+        raise ValueError(
+            "El archivo descargado no es una imagen compatible."
+        ) from error
+
+
+# ==========================================
+# FORMULARIO DE VEHÍCULOS
 # ==========================================
 
 class FormularioVehiculo(discord.ui.Modal):
@@ -127,7 +240,6 @@ class FormularioVehiculo(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
 
-        # Verificar permisos al enviar
         if not es_administrador(interaction):
             await interaction.response.send_message(
                 "No tienes permiso para publicar vehículos.",
@@ -147,49 +259,62 @@ class FormularioVehiculo(discord.ui.Modal):
             )
             return
 
-        # Validar la dirección de la imagen
-        if imagen_url:
-            parsed_url = urlparse(imagen_url)
+        # Preparar la imagen antes de publicar.
+        imagen_procesada = None
 
-            if (
-                parsed_url.scheme not in ("http", "https")
-                or not parsed_url.netloc
-            ):
-                await interaction.response.send_message(
-                    "La URL de imagen no es válida. "
-                    "Debe comenzar por http:// o https://.",
+        if imagen_url:
+            await interaction.response.defer(ephemeral=True)
+
+            try:
+                imagen_procesada = (
+                    await descargar_y_ajustar_imagen(imagen_url)
+                )
+            except (ValueError, aiohttp.ClientError, TimeoutError) as error:
+                await interaction.followup.send(
+                    f"No se pudo procesar la imagen: {error}",
                     ephemeral=True
                 )
                 return
-
-        await interaction.response.defer(ephemeral=True)
+        else:
+            await interaction.response.defer(ephemeral=True)
 
         try:
-            canal = await obtener_canal(self.canal_destino_id)
+            canal = await obtener_canal(
+                self.canal_destino_id
+            )
 
-            # Embed sin color personalizado: sin barra lateral de color
             embed = discord.Embed(
                 title=nombre.upper(),
                 description=descripcion if descripcion else None
             )
 
-            # Precio separado de la descripción
+            # Precio destacado.
             embed.add_field(
                 name="💰 PRECIO DE VENTA",
-                value=f"**{precio}**",
+                value=f"## {precio}",
                 inline=False
             )
-
-            # Imagen horizontal del vehículo, si se proporciona
-            if imagen_url:
-                embed.set_image(url=imagen_url)
 
             embed.set_footer(
                 text=f"Coutt-and-Schutz | Vehículos {self.tipo}"
             )
 
-            # El vehículo solo se publica al enviar el formulario
-            await canal.send(embed=embed)
+            if imagen_procesada:
+                archivo = discord.File(
+                    imagen_procesada,
+                    filename="vehiculo.jpg"
+                )
+
+                embed.set_image(
+                    url="attachment://vehiculo.jpg"
+                )
+
+                await canal.send(
+                    embed=embed,
+                    file=archivo
+                )
+            else:
+                await canal.send(embed=embed)
 
             await interaction.followup.send(
                 f"✅ Vehículo publicado correctamente en "
@@ -198,14 +323,14 @@ class FormularioVehiculo(discord.ui.Modal):
             )
 
             print(
-                f"Vehículo publicado: {nombre} | "
-                f"Precio: {precio} | Tipo: {self.tipo}"
+                f"Publicado: {nombre} | Precio: {precio} | "
+                f"Tipo: {self.tipo}"
             )
 
         except discord.Forbidden:
             await interaction.followup.send(
-                "❌ No tengo permisos para publicar en ese canal. "
-                "Revisa los permisos del bot.",
+                "No tengo permisos para publicar en ese canal. "
+                "Comprueba los permisos del bot.",
                 ephemeral=True
             )
 
@@ -213,8 +338,8 @@ class FormularioVehiculo(discord.ui.Modal):
             print(f"Error de Discord al publicar: {error}")
 
             await interaction.followup.send(
-                "❌ Discord no permitió publicar el vehículo. "
-                "Revisa los registros del bot.",
+                "Discord no permitió publicar el vehículo. "
+                "Revisa los registros de Render.",
                 ephemeral=True
             )
 
@@ -222,9 +347,13 @@ class FormularioVehiculo(discord.ui.Modal):
             print(f"Error inesperado al publicar: {error}")
 
             await interaction.followup.send(
-                "❌ Ocurrió un error inesperado al publicar.",
+                "Ocurrió un error inesperado al publicar.",
                 ephemeral=True
             )
+
+        finally:
+            if imagen_procesada:
+                imagen_procesada.close()
 
 
 # ==========================================
@@ -292,19 +421,18 @@ def crear_embed_panel():
         title="COUTT-AND-SCHUTZ",
         description=(
             "**Panel de publicación de vehículos**\n\n"
-            "Selecciona el tipo de vehículo que deseas publicar. "
-            "Se abrirá un formulario para completar el nombre, "
-            "el precio, la descripción y la imagen.\n\n"
+            "Selecciona dónde quieres publicar el vehículo.\n\n"
             "🚗 **Vehículos usados**\n"
             "Publica en el catálogo de usados.\n\n"
             "🚘 **Vehículos importados**\n"
             "Publica en el catálogo de importados.\n\n"
-            "🔒 Solo los administradores pueden utilizar este panel."
+            "El nombre y el precio son obligatorios. "
+            "La descripción y la imagen son opcionales.\n\n"
+            "🔒 Solo los administradores pueden utilizar el panel."
         )
     )
 
     embed.set_footer(text=MARCA_PANEL)
-
     return embed
 
 
@@ -320,12 +448,10 @@ async def asegurar_panel():
 
     try:
         canal = await obtener_canal(CANAL_PANEL_ID)
-
         panel_existente = None
 
-        # Buscar el panel entre los últimos 200 mensajes
         async for mensaje in canal.history(limit=200):
-            if mensaje.author.id != bot.user.id:
+            if bot.user is None or mensaje.author.id != bot.user.id:
                 continue
 
             for embed in mensaje.embeds:
@@ -336,27 +462,25 @@ async def asegurar_panel():
                     panel_existente = mensaje
                     break
 
-            if panel_existente is not None:
+            if panel_existente:
                 break
 
         vista = PanelPublicaciones()
 
-        if panel_existente is not None:
+        if panel_existente:
             await panel_existente.edit(
                 embed=crear_embed_panel(),
                 view=vista
             )
-
             print(
-                f"Panel existente actualizado: {panel_existente.id}"
+                f"Panel existente actualizado: "
+                f"{panel_existente.id}"
             )
-
         else:
             mensaje = await canal.send(
                 embed=crear_embed_panel(),
                 view=vista
             )
-
             print(f"Panel creado: {mensaje.id}")
 
         panel_inicializado = True
@@ -376,21 +500,18 @@ async def asegurar_panel():
 # ==========================================
 
 @bot.event
+async def setup_hook():
+    bot.add_view(PanelPublicaciones())
+
+
+@bot.event
 async def on_ready():
-    global vista_registrada
-
     print(f"Bot conectado como {bot.user}")
-
-    # Registrar los botones persistentes una sola vez
-    if not vista_registrada:
-        bot.add_view(PanelPublicaciones())
-        vista_registrada = True
-
     await asegurar_panel()
 
 
 # ==========================================
-# INICIO
+# ARRANQUE
 # ==========================================
 
 if __name__ == "__main__":
