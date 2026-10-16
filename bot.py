@@ -61,7 +61,6 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 panel_inicializado = False
-vista_registrada = False
 
 
 def es_administrador(interaction: discord.Interaction) -> bool:
@@ -87,7 +86,7 @@ async def obtener_canal(canal_id: int):
 async def descargar_y_ajustar_imagen(url: str):
     """
     Descarga una imagen y la adapta a un lienzo 16:9.
-    Conserva la imagen completa sin estirar el vehículo.
+    Conserva la imagen completa sin estirarla ni recortarla.
     """
 
     parsed = urlparse(url)
@@ -102,18 +101,29 @@ async def descargar_y_ajustar_imagen(url: str):
 
     timeout = aiohttp.ClientTimeout(total=20)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+        )
+    }
+
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        headers=headers
+    ) as session:
         async with session.get(
             url,
             allow_redirects=True
         ) as response:
 
+            # Comprobar el código HTTP del servidor.
             if response.status != 200:
-    raise ValueError(
-        f"El servidor de imágenes respondió HTTP "
-        f"{response.status}. Comprueba el enlace "
-        f"o prueba con otra imagen."
-    )
+                raise ValueError(
+                    f"El servidor de imágenes respondió HTTP "
+                    f"{response.status}. Comprueba el enlace "
+                    f"o prueba con otra imagen."
+                )
 
             content_type = response.headers.get(
                 "Content-Type", ""
@@ -121,7 +131,9 @@ async def descargar_y_ajustar_imagen(url: str):
 
             if not content_type.startswith("image/"):
                 raise ValueError(
-                    "El enlace no apunta directamente a una imagen."
+                    "El enlace no apunta directamente a una imagen. "
+                    "Usa la URL directa del archivo, por ejemplo "
+                    "una que termine en .jpg, .jpeg, .png o .webp."
                 )
 
             longitud = response.content_length
@@ -146,45 +158,45 @@ async def descargar_y_ajustar_imagen(url: str):
             original.load()
 
             imagen = ImageOps.exif_transpose(original)
+
             imagen.thumbnail(
                 (ANCHO_IMAGEN, ALTO_IMAGEN),
                 Image.Resampling.LANCZOS
             )
 
-            # Fondo oscuro para completar el formato horizontal.
+            # Crear un fondo oscuro en formato 16:9.
             lienzo = Image.new(
                 "RGB",
                 (ANCHO_IMAGEN, ALTO_IMAGEN),
                 (24, 24, 27)
             )
 
-            # Centrar la imagen sin deformarla ni recortarla.
+            # Centrar sin deformar ni cortar la imagen.
             if imagen.mode in ("RGBA", "LA"):
                 imagen = imagen.convert("RGBA")
+
                 x = (ANCHO_IMAGEN - imagen.width) // 2
                 y = (ALTO_IMAGEN - imagen.height) // 2
 
-                lienzo.paste(
-                    imagen,
-                    (x, y),
-                    imagen
-                )
+                lienzo.paste(imagen, (x, y), imagen)
             else:
                 imagen = imagen.convert("RGB")
+
                 x = (ANCHO_IMAGEN - imagen.width) // 2
                 y = (ALTO_IMAGEN - imagen.height) // 2
 
                 lienzo.paste(imagen, (x, y))
 
             salida = io.BytesIO()
+
             lienzo.save(
                 salida,
                 format="JPEG",
                 quality=92,
                 optimize=True
             )
-            salida.seek(0)
 
+            salida.seek(0)
             return salida
 
     except (UnidentifiedImageError, OSError) as error:
@@ -260,24 +272,25 @@ class FormularioVehiculo(discord.ui.Modal):
             )
             return
 
-        # Preparar la imagen antes de publicar.
+        await interaction.response.defer(ephemeral=True)
+
         imagen_procesada = None
 
         if imagen_url:
-            await interaction.response.defer(ephemeral=True)
-
             try:
                 imagen_procesada = (
                     await descargar_y_ajustar_imagen(imagen_url)
                 )
-            except (ValueError, aiohttp.ClientError, TimeoutError) as error:
+            except (
+                ValueError,
+                aiohttp.ClientError,
+                TimeoutError
+            ) as error:
                 await interaction.followup.send(
                     f"No se pudo procesar la imagen: {error}",
                     ephemeral=True
                 )
                 return
-        else:
-            await interaction.response.defer(ephemeral=True)
 
         try:
             canal = await obtener_canal(
@@ -289,7 +302,6 @@ class FormularioVehiculo(discord.ui.Modal):
                 description=descripcion if descripcion else None
             )
 
-            # Precio destacado.
             embed.add_field(
                 name="💰 PRECIO DE VENTA",
                 value=f"## {precio}",
@@ -473,6 +485,7 @@ async def asegurar_panel():
                 embed=crear_embed_panel(),
                 view=vista
             )
+
             print(
                 f"Panel existente actualizado: "
                 f"{panel_existente.id}"
@@ -482,6 +495,7 @@ async def asegurar_panel():
                 embed=crear_embed_panel(),
                 view=vista
             )
+
             print(f"Panel creado: {mensaje.id}")
 
         panel_inicializado = True
