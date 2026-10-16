@@ -3,6 +3,7 @@ import io
 import asyncio
 import logging
 import threading
+import re
 from datetime import datetime, timezone
 
 import discord
@@ -20,6 +21,12 @@ PANEL_CHANNEL_ID = 1560513189438029935
 USED_VEHICLES_CHANNEL_ID = 1560447325912961214
 IMPORTED_VEHICLES_CHANNEL_ID = 1560447082060447835
 WELCOME_CHANNEL_ID = 1558770818433949769
+
+# Sistema de verificación.
+VERIFICATION_CHANNEL_ID = 1560779383055327262
+VERIFIED_ROLE_ID = 1558774898103685131
+UNVERIFIED_ROLE_ID = 1560779721183072266
+VERIFICATION_BUTTON_ID = "coutt_schutz:verification_start"
 
 PANEL_MARKER = "COUTT_SCHUTZ_VEHICLE_PANEL"
 
@@ -42,6 +49,7 @@ COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
 COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
 PANEL_COLOR = discord.Colour.from_rgb(255, 140, 0)      # naranja (panel)
 TICKET_COLOR = discord.Colour.from_rgb(88, 101, 242)    # azul (tickets)
+VERIFICATION_COLOR = discord.Colour.from_rgb(46, 204, 113)
 
 # Categorías predefinidas que se pueden elegir en el formulario
 # (máximo 25). Formato: (nombre, emoji).
@@ -100,6 +108,7 @@ class CouttSchutzBot(commands.Bot):
         self.add_view(VehiclePanelView())
         self.add_view(TicketPanelView())
         self.add_view(TicketControlView())
+        self.add_view(VerificationPanelView())
 
 
 bot = CouttSchutzBot(
@@ -180,6 +189,207 @@ def prepare_image(image_bytes):
 
         output.seek(0)
         return output.getvalue()
+
+
+# ============================================================
+# VERIFICACIÓN DE MIEMBROS
+# ============================================================
+
+# Formato obligatorio: Nombre_Apellido. Solo letras, incluyendo
+# vocales acentuadas, ü y ñ; exactamente un guion bajo.
+RP_NAME_PATTERN = re.compile(
+    r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+_[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\Z"
+)
+
+
+class VerificationModal(discord.ui.Modal, title="Verificación del servidor"):
+    rp_name = discord.ui.TextInput(
+        label="Nombre y apellido de tu personaje",
+        placeholder="Ejemplo: Juan_Perez",
+        min_length=3,
+        max_length=50,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        member = interaction.user
+        if not isinstance(member, discord.Member) or interaction.guild is None:
+            await interaction.response.send_message(
+                "No pude identificar tu miembro del servidor. Inténtalo de nuevo.",
+                ephemeral=True
+            )
+            return
+
+        submitted_name = str(self.rp_name.value).strip()
+
+        if not RP_NAME_PATTERN.fullmatch(submitted_name):
+            await interaction.response.send_message(
+                "❌ **Formato incorrecto.** Escribe el nombre de tu personaje "
+                "como `Nombre_Apellido`, con un solo guion bajo y únicamente "
+                "letras. No uses espacios ni números.\n\n"
+                "Ejemplo válido: `Juan_Perez`.",
+                ephemeral=True
+            )
+            return
+
+        verified_role = interaction.guild.get_role(VERIFIED_ROLE_ID)
+        unverified_role = interaction.guild.get_role(UNVERIFIED_ROLE_ID)
+
+        if verified_role is None:
+            await interaction.response.send_message(
+                "No se encontró el rol de verificado. Avisa a un administrador.",
+                ephemeral=True
+            )
+            logger.error("No se encontró el rol verificado ID %s", VERIFIED_ROLE_ID)
+            return
+
+        if verified_role in member.roles:
+            await interaction.response.send_message(
+                "Ya estás verificado. No necesitas completar el formulario otra vez.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            await member.add_roles(
+                verified_role,
+                reason=f"Verificación completada con nombre RP: {submitted_name}"
+            )
+
+            if unverified_role is not None and unverified_role in member.roles:
+                await member.remove_roles(
+                    unverified_role,
+                    reason="Miembro completó la verificación"
+                )
+
+        except discord.Forbidden:
+            logger.exception(
+                "No se pudieron cambiar los roles de verificación. "
+                "Comprueba la jerarquía de roles y el permiso Gestionar roles."
+            )
+            await interaction.response.send_message(
+                "No pude asignarte los roles. Avisa a un administrador para que "
+                "revise los permisos y la posición del rol del bot.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException:
+            logger.exception("Error de Discord al asignar roles de verificación.")
+            await interaction.response.send_message(
+                "Ocurrió un error al verificarte. Inténtalo de nuevo en unos momentos.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"✅ Verificación completada. Se te asignó el rol {verified_role.mention}.",
+            ephemeral=True
+        )
+        logger.info(
+            "Miembro verificado: %s (%s), nombre RP: %s",
+            member,
+            member.id,
+            submitted_name
+        )
+
+
+class StartVerificationButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Verificarme",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            custom_id=VERIFICATION_BUTTON_ID
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        member = interaction.user
+
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "No pude identificar tu miembro del servidor. Inténtalo de nuevo.",
+                ephemeral=True
+            )
+            return
+
+        verified_role = interaction.guild.get_role(VERIFIED_ROLE_ID) if interaction.guild else None
+
+        if verified_role is not None and verified_role in member.roles:
+            await interaction.response.send_message(
+                "Ya estás verificado. No necesitas completar el formulario otra vez.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(VerificationModal())
+
+
+class VerificationPanelView(discord.ui.LayoutView):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        container = discord.ui.Container(accent_colour=VERIFICATION_COLOR)
+        container.add_item(discord.ui.TextDisplay(
+            "# ✅ VERIFICACIÓN\n"
+            "-# Coutt-and-Schutz | Acceso al servidor"
+        ))
+        container.add_item(discord.ui.Separator(
+            spacing=discord.SeparatorSpacing.large
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "Para acceder al resto del servidor, debes verificar el nombre de tu "
+            "personaje de rol.\n\n"
+            "**Formato obligatorio:** `Nombre_Apellido`\n"
+            "**Ejemplo válido:** `Juan_Perez`\n\n"
+            "Usa únicamente letras y un solo guion bajo entre el nombre y el "
+            "apellido. No se permiten espacios ni números."
+        ))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.ActionRow(StartVerificationButton()))
+        self.add_item(container)
+
+
+async def ensure_verification_panel():
+    channel = bot.get_channel(VERIFICATION_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(VERIFICATION_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception("No se pudo acceder al canal de verificación.")
+            return
+
+    try:
+        current_panel = None
+
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+
+            if contains_panel_button(message.components, {VERIFICATION_BUTTON_ID}):
+                if current_panel is None:
+                    current_panel = message
+                else:
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+
+        if current_panel is not None:
+            await current_panel.edit(view=VerificationPanelView())
+            logger.info("Panel de verificación actualizado.")
+            return
+
+        await channel.send(view=VerificationPanelView())
+        logger.info("Panel de verificación publicado.")
+
+    except discord.Forbidden:
+        logger.error(
+            "Faltan permisos para leer el historial o enviar mensajes "
+            "en el canal de verificación."
+        )
+    except discord.HTTPException:
+        logger.exception("Error al configurar el panel de verificación.")
 
 
 # ============================================================
@@ -849,6 +1059,28 @@ async def ensure_ticket_panel():
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    # Asignar el rol "No verificado" antes de intentar enviar la bienvenida.
+    unverified_role = member.guild.get_role(UNVERIFIED_ROLE_ID)
+
+    if unverified_role is None:
+        logger.error(
+            "No se encontró el rol No verificado ID %s",
+            UNVERIFIED_ROLE_ID
+        )
+    else:
+        try:
+            await member.add_roles(
+                unverified_role,
+                reason="Nuevo miembro: requiere completar la verificación"
+            )
+        except discord.Forbidden:
+            logger.exception(
+                "No se pudo asignar No verificado. Comprueba Gestionar roles "
+                "y que el rol del bot esté por encima de ese rol."
+            )
+        except discord.HTTPException:
+            logger.exception("Error al asignar el rol No verificado.")
+
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
 
     if channel is None:
@@ -1067,6 +1299,7 @@ async def on_ready():
 
     await ensure_panel()
     await ensure_ticket_panel()
+    await ensure_verification_panel()
 
 
 def main():
