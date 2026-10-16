@@ -31,6 +31,16 @@ REQUEST_TIMEOUT = 600
 COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
 COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
 
+# Categorías predefinidas que se pueden elegir en el formulario
+# (máximo 25). Formato: (nombre, emoji).
+VEHICLE_CATEGORIES = [
+    ("Exclusivos", "💎"),
+    ("Super-Deportivos", "🏎️"),
+    ("Deportivos", "🚗"),
+    ("Camionetas", "🛻"),
+    ("Motocicletas", "🏍️"),
+]
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("coutt-and-schutz")
 
@@ -164,7 +174,7 @@ def prepare_image(image_bytes):
 # ============================================================
 
 def build_vehicle_view(name, price, description, category,
-                       vehicle_type, filename):
+                       type_label, vehicle_type, filename):
     """
     Crea la publicación con estilo de contenedor:
     barra de color lateral, separadores, cita y galería de imagen.
@@ -189,7 +199,8 @@ def build_vehicle_view(name, price, description, category,
     container.add_item(
         discord.ui.TextDisplay(
             f"> 💰 **Precio:** {price}\n"
-            f"> 🏷️ **Categoría:** {category}"
+            f"> 🏷️ **Categoría:** {category}\n"
+            f"> 📦 **Tipo:** {type_label}"
         )
     )
     container.add_item(discord.ui.Separator())
@@ -220,30 +231,50 @@ class VehicleModal(discord.ui.Modal):
         super().__init__(title=title)
 
         self.vehicle_name = discord.ui.TextInput(
-            label="Nombre del vehículo",
             placeholder="Ej.: BMW M4 Competition",
             max_length=100,
             required=True
         )
 
+        self.vehicle_category = discord.ui.Select(
+            placeholder="Elige una categoría",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=name, value=name, emoji=emoji)
+                for name, emoji in VEHICLE_CATEGORIES
+            ]
+        )
+
         self.vehicle_price = discord.ui.TextInput(
-            label="Precio del vehículo",
             placeholder="Ej.: 85.000",
             max_length=50,
             required=True
         )
 
         self.vehicle_description = discord.ui.TextInput(
-            label="Descripción (opcional)",
             placeholder="Estado, año, motor, extras...",
             style=discord.TextStyle.paragraph,
             max_length=1000,
             required=False
         )
 
-        self.add_item(self.vehicle_name)
-        self.add_item(self.vehicle_price)
-        self.add_item(self.vehicle_description)
+        self.add_item(discord.ui.Label(
+            text="Nombre del vehículo",
+            component=self.vehicle_name
+        ))
+        self.add_item(discord.ui.Label(
+            text="Categoría",
+            component=self.vehicle_category
+        ))
+        self.add_item(discord.ui.Label(
+            text="Precio del vehículo",
+            component=self.vehicle_price
+        ))
+        self.add_item(discord.ui.Label(
+            text="Descripción (opcional)",
+            component=self.vehicle_description
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
@@ -272,6 +303,7 @@ class VehicleModal(discord.ui.Modal):
         pending_uploads[interaction.user.id] = {
             "vehicle_type": self.vehicle_type,
             "name": str(self.vehicle_name.value).strip(),
+            "category": self.vehicle_category.values[0],
             "price": str(self.vehicle_price.value).strip(),
             "description": (
                 str(self.vehicle_description.value).strip()
@@ -283,6 +315,7 @@ class VehicleModal(discord.ui.Modal):
 
         await interaction.response.send_message(
             f"**Vehículo:** {self.vehicle_name.value}\n"
+            f"**Categoría:** {self.vehicle_category.values[0]}\n"
             f"**Precio:** {self.vehicle_price.value}\n\n"
             f"Ahora entra en <#{PANEL_CHANNEL_ID}> y envía "
             "la fotografía como archivo adjunto en un mensaje "
@@ -531,10 +564,13 @@ async def on_message(message: discord.Message):
                     # Determinar el canal de destino.
                     if request["vehicle_type"] == "used":
                         destination_id = USED_VEHICLES_CHANNEL_ID
-                        category = "Vehículos usados"
+                        type_label = "Vehículo usado"
                     else:
                         destination_id = IMPORTED_VEHICLES_CHANNEL_ID
-                        category = "Vehículos importados"
+                        type_label = "Vehículo importado"
+
+                    # Categoría elegida en el formulario.
+                    category = request["category"]
 
                     destination = bot.get_channel(destination_id)
 
@@ -555,6 +591,7 @@ async def on_message(message: discord.Message):
                         price=request["price"],
                         description=request["description"],
                         category=category,
+                        type_label=type_label,
                         vehicle_type=request["vehicle_type"],
                         filename="vehiculo.png"
                     )
