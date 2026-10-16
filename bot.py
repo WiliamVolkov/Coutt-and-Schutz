@@ -1,4 +1,3 @@
-
 import os
 import io
 import logging
@@ -27,6 +26,10 @@ IMAGE_WIDTH = 1600
 IMAGE_HEIGHT = 900
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 REQUEST_TIMEOUT = 600
+
+# Color de la barra lateral de cada publicación.
+COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
+COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("coutt-and-schutz")
@@ -154,6 +157,51 @@ def prepare_image(image_bytes):
 
         output.seek(0)
         return output.getvalue()
+
+
+# ============================================================
+# PUBLICACIÓN DE VEHÍCULOS (CONTENEDOR - COMPONENTS V2)
+# ============================================================
+
+def build_vehicle_view(name, price, description, category,
+                       vehicle_type, filename):
+    """
+    Crea la publicación con estilo de contenedor:
+    barra de color lateral, separadores, cita y galería de imagen.
+    Requiere discord.py >= 2.6.
+    """
+
+    accent = COLOR_USED if vehicle_type == "used" else COLOR_IMPORTED
+
+    container = discord.ui.Container(accent_colour=accent)
+
+    # Título grande.
+    container.add_item(
+        discord.ui.TextDisplay(f"## {name.upper()}")
+    )
+    container.add_item(discord.ui.Separator())
+
+    # Descripción.
+    container.add_item(discord.ui.TextDisplay(description))
+    container.add_item(discord.ui.Separator())
+
+    # Bloque de cita con precio y categoría.
+    container.add_item(
+        discord.ui.TextDisplay(
+            f"> 💰 **Precio:** {price}\n"
+            f"> 🏷️ **Categoría:** {category}"
+        )
+    )
+    container.add_item(discord.ui.Separator())
+
+    # Imagen grande.
+    gallery = discord.ui.MediaGallery()
+    gallery.add_item(media=f"attachment://{filename}")
+    container.add_item(gallery)
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
 
 
 # ============================================================
@@ -501,34 +549,27 @@ async def on_message(message: discord.Message):
                         filename="vehiculo.png"
                     )
 
-                    # Crear la publicación.
-                    embed = discord.Embed(
-                        title=request["name"],
+                    # Crear la publicación (contenedor).
+                    view = build_vehicle_view(
+                        name=request["name"],
+                        price=request["price"],
                         description=request["description"],
-                        color=discord.Color.dark_blue()
+                        category=category,
+                        vehicle_type=request["vehicle_type"],
+                        filename="vehiculo.png"
                     )
 
-                    embed.add_field(
-                        name="💰 Precio",
-                        value=f"**{request['price']}**",
-                        inline=False
-                    )
-
-                    embed.add_field(
-                        name="Categoría",
-                        value=category,
-                        inline=True
-                    )
-
-                    embed.set_image(url="attachment://vehiculo.png")
-
-                    embed.set_footer(
-                        text="Coutt-and-Schutz | Publicación de vehículos"
+                    # Texto superior. Con Components V2 no se puede
+                    # mezclar "content" con el contenedor, así que
+                    # va en un mensaje aparte.
+                    await destination.send(
+                        f"**{category}** - Coutt-and-Schutz | "
+                        "¡Consultar stock!"
                     )
 
                     # Publicar el vehículo.
                     await destination.send(
-                        embed=embed,
+                        view=view,
                         file=file
                     )
 
