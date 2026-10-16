@@ -11,6 +11,8 @@ from discord.ext import commands
 from flask import Flask
 from PIL import Image, ImageOps, ImageFilter
 
+from ai_assistant import setup_ai
+
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
@@ -109,6 +111,13 @@ class CouttSchutzBot(commands.Bot):
         self.add_view(TicketPanelView())
         self.add_view(TicketControlView())
         self.add_view(VerificationPanelView())
+
+        # Asistente de IA (mención o comando !ia).
+        await setup_ai(
+            self,
+            USED_VEHICLES_CHANNEL_ID,
+            IMPORTED_VEHICLES_CHANNEL_ID
+        )
 
 
 bot = CouttSchutzBot(
