@@ -30,6 +30,7 @@ REQUEST_TIMEOUT = 600
 # Color de la barra lateral de cada publicación.
 COLOR_USED = discord.Colour.from_rgb(30, 144, 255)      # azul
 COLOR_IMPORTED = discord.Colour.from_rgb(46, 204, 113)  # verde
+PANEL_COLOR = discord.Colour.from_rgb(255, 140, 0)      # naranja (panel)
 
 # Categorías predefinidas que se pueden elegir en el formulario
 # (máximo 25). Formato: (nombre, emoji).
@@ -328,82 +329,144 @@ class VehicleModal(discord.ui.Modal):
 
 
 # ============================================================
-# BOTONES DEL PANEL
+# PANEL (CONTENEDOR - COMPONENTS V2)
 # ============================================================
 
-class VehiclePanelView(discord.ui.View):
+PANEL_BUTTON_IDS = {"coutt_schutz:used", "coutt_schutz:imported"}
+
+
+class PublishButton(discord.ui.Button):
+    """Botón que abre el formulario de publicación."""
+
+    def __init__(self, vehicle_type, label, emoji, style, custom_id):
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=style,
+            custom_id=custom_id
+        )
+        self.vehicle_type = vehicle_type
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "Solo los administradores pueden publicar vehículos.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(
+            VehicleModal(self.vehicle_type)
+        )
+
+
+class VehiclePanelView(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Vehículos usados",
-        style=discord.ButtonStyle.primary,
-        emoji="🚘",
-        custom_id="coutt_schutz:used"
-    )
-    async def used_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "Solo los administradores pueden publicar vehículos.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.send_modal(
-            VehicleModal("used")
+        categories = "  ·  ".join(
+            f"{emoji} {name}" for name, emoji in VEHICLE_CATEGORIES
         )
 
-    @discord.ui.button(
-        label="Vehículos importados",
-        style=discord.ButtonStyle.success,
-        emoji="🌎",
-        custom_id="coutt_schutz:imported"
-    )
-    async def imported_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "Solo los administradores pueden publicar vehículos.",
-                ephemeral=True
-            )
-            return
+        container = discord.ui.Container(accent_colour=PANEL_COLOR)
 
-        await interaction.response.send_modal(
-            VehicleModal("imported")
-        )
+        # Cabecera.
+        container.add_item(discord.ui.TextDisplay(
+            "# 🚗 COUTT & SCHUTZ\n"
+            "-# Sistema de publicación de vehículos"
+        ))
+        container.add_item(discord.ui.Separator(
+            spacing=discord.SeparatorSpacing.large
+        ))
+
+        # Instrucciones.
+        container.add_item(discord.ui.TextDisplay(
+            "Selecciona el tipo de vehículo que quieres publicar. "
+            "Se abrirá un formulario donde podrás elegir la "
+            "**categoría**, el **precio** y añadir una descripción."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        # Vehículos usados (texto + botón al lado).
+        container.add_item(discord.ui.Section(
+            discord.ui.TextDisplay(
+                "### 🚘 Vehículos usados\n"
+                "Publica vehículos de segunda mano."
+            ),
+            accessory=PublishButton(
+                vehicle_type="used",
+                label="Publicar",
+                emoji="🚘",
+                style=discord.ButtonStyle.primary,
+                custom_id="coutt_schutz:used"
+            )
+        ))
+
+        # Vehículos importados (texto + botón al lado).
+        container.add_item(discord.ui.Section(
+            discord.ui.TextDisplay(
+                "### 🌎 Vehículos importados\n"
+                "Publica vehículos importados."
+            ),
+            accessory=PublishButton(
+                vehicle_type="imported",
+                label="Publicar",
+                emoji="🌎",
+                style=discord.ButtonStyle.success,
+                custom_id="coutt_schutz:imported"
+            )
+        ))
+        container.add_item(discord.ui.Separator())
+
+        # Categorías y pasos.
+        container.add_item(discord.ui.TextDisplay(
+            f"> 🏷️ **Categorías disponibles**\n"
+            f"> {categories}"
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "**¿Cómo funciona?**\n"
+            "**1.** Pulsa el botón del tipo de vehículo.\n"
+            "**2.** Rellena el formulario.\n"
+            "**3.** Adjunta la fotografía en este canal."
+        ))
+        container.add_item(discord.ui.Separator())
+
+        # Pie.
+        container.add_item(discord.ui.TextDisplay(
+            "-# 🔒 Panel exclusivo para administradores  •  "
+            "Coutt-and-Schutz"
+        ))
+
+        self.add_item(container)
 
 
 # ============================================================
-# PANEL AUTOMÁTICO
+# GESTIÓN DEL PANEL
 # ============================================================
 
-def create_panel_embed():
-    embed = discord.Embed(
-        title="Coutt-and-Schutz | Venta de vehículos",
-        description=(
-            "Bienvenido al sistema de publicaciones de "
-            "**Coutt-and-Schutz**.\n\n"
-            "Selecciona la categoría correspondiente para "
-            "iniciar una publicación.\n\n"
-            "🚘 **Vehículos usados**\n"
-            "Publica vehículos de segunda mano.\n\n"
-            "🌎 **Vehículos importados**\n"
-            "Publica vehículos importados.\n\n"
-            "Después de completar el formulario, adjunta la imagen "
-            "directamente desde tu ordenador en el canal del panel."
-        ),
-        color=discord.Color.dark_blue()
-    )
+def contains_panel_button(components):
+    """Busca de forma recursiva los botones del panel en un mensaje."""
+    for component in components:
+        if getattr(component, "custom_id", None) in PANEL_BUTTON_IDS:
+            return True
 
-    embed.set_footer(text=PANEL_MARKER)
-    return embed
+        children = getattr(component, "children", None)
+        if children and contains_panel_button(children):
+            return True
+
+        accessory = getattr(component, "accessory", None)
+        if accessory is not None and contains_panel_button([accessory]):
+            return True
+
+    return False
+
+
+def is_legacy_panel(message):
+    """Detecta el panel antiguo (embed con marca en el pie)."""
+    return any(
+        embed.footer and embed.footer.text == PANEL_MARKER
+        for embed in message.embeds
+    )
 
 
 async def ensure_panel():
@@ -419,23 +482,42 @@ async def ensure_panel():
             return
 
     try:
-        # Buscar el panel existente para evitar duplicados.
+        current_panel = None
+
         async for message in channel.history(limit=100):
             if message.author.id != bot.user.id:
                 continue
 
-            for embed in message.embeds:
-                if embed.footer and embed.footer.text == PANEL_MARKER:
-                    await message.edit(view=VehiclePanelView())
-                    logger.info("Panel existente restaurado.")
-                    return
+            # Panel antiguo (embed): se elimina para sustituirlo.
+            if is_legacy_panel(message):
+                try:
+                    await message.delete()
+                    logger.info("Panel antiguo eliminado.")
+                except discord.HTTPException:
+                    logger.warning(
+                        "No se pudo eliminar el panel antiguo. "
+                        "Falta el permiso Gestionar mensajes."
+                    )
+                continue
+
+            # Panel nuevo (contenedor).
+            if contains_panel_button(message.components):
+                if current_panel is None:
+                    current_panel = message
+                else:
+                    # Eliminar duplicados.
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+
+        if current_panel is not None:
+            await current_panel.edit(view=VehiclePanelView())
+            logger.info("Panel existente actualizado.")
+            return
 
         # Crear un panel si no existe.
-        await channel.send(
-            embed=create_panel_embed(),
-            view=VehiclePanelView()
-        )
-
+        await channel.send(view=VehiclePanelView())
         logger.info("Panel de vehículos publicado.")
 
     except discord.Forbidden:
