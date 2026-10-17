@@ -1345,18 +1345,33 @@ class InvitePanelView(discord.ui.LayoutView):
 
 
 def find_invite_code(components):
-    """Busca de forma recursiva un enlace de invitación en los botones."""
-    for component in components:
+    """Busca enlaces de invitación tanto en botones como en componentes de texto."""
+    for component in components or []:
+        # Botones de enlace tradicionales.
         url = getattr(component, "url", None)
-
         if isinstance(url, str):
             match = INVITE_CODE_RE.search(url)
             if match:
                 return match.group(1)
 
+        # Los LayoutView actuales muestran la URL dentro de TextDisplay,
+        # no necesariamente en la propiedad `url` de un botón.
+        for attribute in ("content", "text", "label", "description"):
+            value = getattr(component, attribute, None)
+            if isinstance(value, str):
+                match = INVITE_CODE_RE.search(value)
+                if match:
+                    return match.group(1)
+
         children = getattr(component, "children", None)
         if children:
             code = find_invite_code(children)
+            if code:
+                return code
+
+        nested = getattr(component, "components", None)
+        if nested:
+            code = find_invite_code(nested)
             if code:
                 return code
 
@@ -1389,6 +1404,17 @@ async def ensure_invite_panel():
                 continue
 
             found = find_invite_code(message.components)
+            if not found:
+                # Compatibilidad con versiones de discord.py donde los
+                # componentes de LayoutView no exponen sus textos igual.
+                searchable_text = message.content or ""
+                for embed in message.embeds:
+                    searchable_text += "\n" + (embed.title or "") + "\n" + (embed.description or "")
+                    if embed.footer and embed.footer.text:
+                        searchable_text += "\n" + embed.footer.text
+                match = INVITE_CODE_RE.search(searchable_text)
+                if match:
+                    found = match.group(1)
             if not found:
                 continue
 
