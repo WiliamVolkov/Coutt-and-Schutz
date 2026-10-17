@@ -27,6 +27,10 @@ WELCOME_CHANNEL_ID = 1558770818433949769
 # Canal donde el bot publica la invitación permanente del servidor.
 INVITE_CHANNEL_ID = 1560801851467759708
 
+# Canal donde se publica automáticamente la guía de uso V1.
+GUIDE_CHANNEL_ID = 1560795723057070170
+GUIDE_MARKER = "COUTT_SCHUTZ_GUIDE_V1_2026"
+
 # Sistema de verificación.
 VERIFICATION_CHANNEL_ID = 1560779383055327262
 VERIFIED_ROLE_ID = 1558774898103685131
@@ -1708,6 +1712,144 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
+
+# ============================================================
+# GUÍA DE USO V1 PARA NUEVOS MIEMBROS
+# ============================================================
+
+def build_v1_guide_messages():
+    """Crea los mensajes de la guía sin superar el límite de Discord."""
+    return [
+        (
+            f"-# {GUIDE_MARKER}\n"
+            "# 🏁 COUTT & SCHUTZ — GUÍA OFICIAL V1\n"
+            "¡Te damos la bienvenida! Esta guía explica las funciones disponibles "
+            "en el servidor y cómo utilizar las herramientas del bot. Guárdala como referencia.\n\n"
+            "## 🔑 1. Verificación de tu personaje\n"
+            "Al entrar al servidor recibirás el rol **No verificado**. Para completar el acceso:\n"
+            f"1. Abre <#{VERIFICATION_CHANNEL_ID}>.\n"
+            "2. Pulsa **Verificarme** y completa el formulario.\n"
+            "3. Escribe el nombre de tu personaje con el formato `Nombre_Apellido`, "
+            "por ejemplo `Juan_Perez`.\n"
+            "4. Utiliza letras y un solo guion bajo; no uses espacios ni números.\n\n"
+            "Si el formato es válido, el bot te asignará el rol de verificado, quitará "
+            "el de no verificado y actualizará tu apodo para mostrar el nombre del personaje. "
+            "Si ya estás verificado, no podrás repetir el proceso.\n\n"
+            "## 👋 2. Bienvenida automática\n"
+            "Cuando una persona se une, el bot le asigna el rol de no verificado y publica "
+            "una bienvenida con accesos al catálogo y a la atención al cliente."
+        ),
+        (
+            "## 🚘 3. Catálogo de vehículos\n"
+            f"**Vehículos usados:** <#{USED_VEHICLES_CHANNEL_ID}>\n"
+            f"**Vehículos importados:** <#{IMPORTED_VEHICLES_CHANNEL_ID}>\n\n"
+            "Las publicaciones pueden incluir nombre, precio, categoría, descripción, "
+            "fotografía y fecha. Las categorías disponibles son:\n"
+            "🏎️ Deportivos · 🚗 Sedanes · 🛻 Camionetas · 🏍️ Motocicletas · ✈️ Aéreos · 🚤 Barcos.\n\n"
+            "Si una publicación tiene el botón **Consultar este vehículo**, púlsalo para "
+            "ir al canal de atención y abrir una consulta. La publicación sirve como "
+            "referencia; confirma con el equipo la disponibilidad y las condiciones finales.\n\n"
+            "## 🤖 4. Asistente virtual con IA\n"
+            "Puedes preguntar por vehículos del catálogo, categorías, precios publicados, "
+            "comparaciones y recomendaciones según tus preferencias o presupuesto.\n\n"
+            "**Cómo usarlo:** menciona a Coutt & Schutz en un mensaje y escribe tu pregunta, "
+            "o utiliza el comando `/ia` si está disponible en tu lista de comandos.\n"
+            "Ejemplos: “¿Qué deportivos hay?”, “Compara los sedanes publicados” o "
+            "“¿Qué opciones hay con este presupuesto?”.\n\n"
+            "El asistente utiliza las publicaciones de vehículos usados e importados. "
+            "Si necesitas confirmar una operación, negociar o recibir atención personalizada, "
+            "abre un ticket. Las respuestas pueden tardar un poco y conviene confirmar "
+            "los datos importantes con el personal."
+        ),
+        (
+            "## 🎫 5. Atención al cliente mediante tickets\n"
+            f"Entra en <#{TICKET_PANEL_CHANNEL_ID}> y pulsa **Abrir ticket**.\n\n"
+            "El bot creará un canal privado para ti y el equipo de Coutt & Schutz. "
+            "Solo puedes tener un ticket abierto a la vez; si ya tienes uno, el bot te "
+            "mostrará el acceso al canal existente.\n\n"
+            "Dentro del ticket, explica qué necesitas. Si consultas por un vehículo, "
+            "incluye el nombre o enlace de la publicación, tu presupuesto y tus dudas. "
+            "El equipo de atención podrá responderte allí.\n\n"
+            "Cuando termines, utiliza **Cerrar ticket** y confirma la acción. El canal "
+            "se elimina después del cierre, por lo que debes guardar cualquier información "
+            "que necesites conservar. El personal autorizado también puede cerrarlo.\n\n"
+            "## 🔗 6. Invitación al servidor\n"
+            f"En <#{INVITE_CHANNEL_ID}> encontrarás el enlace oficial para invitar a otras "
+            "personas a unirse a Coutt & Schutz. Copia el enlace del mensaje y compártelo."
+        ),
+        (
+            "## 🛠️ 7. Publicación de vehículos — solo administradores\n"
+            "El panel de publicación es una herramienta exclusiva del personal autorizado. "
+            "Los miembros normales no pueden publicar anuncios desde esos botones.\n\n"
+            "1. En el panel, elige **Publicar** en la sección de usados o importados.\n"
+            "2. Completa el formulario con nombre, categoría, precio y descripción "
+            "(si el campo lo permite, la descripción puede ser opcional).\n"
+            "3. Cuando el bot lo solicite, adjunta la fotografía como archivo en el canal "
+            "del panel dentro de los siguientes **10 minutos**.\n"
+            "4. La imagen se adapta automáticamente a un formato horizontal de **1600 × 900 "
+            "(16:9)** con fondo desenfocado para evitar recortar el vehículo, y el anuncio "
+            "se publica en el canal correspondiente.\n\n"
+            "Las imágenes deben pesar **10 MB o menos**. Si la solicitud caduca, vuelve a "
+            "iniciar la publicación. Si algo falla, revisa los permisos del bot y contacta "
+            "con otro administrador.\n\n"
+            "## ⚙️ 8. Funciones automáticas del bot\n"
+            "• Mantiene disponibles los paneles de verificación, publicación y tickets.\n"
+            "• Gestiona el mensaje de invitación del servidor.\n"
+            "• Da la bienvenida a nuevos miembros y les asigna el rol inicial.\n"
+            "• Conserva el acceso al servicio web de estado para el alojamiento."
+        ),
+        (
+            "## ❓ 9. ¿Qué hago si necesito ayuda?\n"
+            "• **No puedo verificarme:** revisa el formato `Nombre_Apellido`; si sigue fallando, contacta a un administrador.\n"
+            "• **Quiero información de un vehículo:** consulta el catálogo o pregunta a la IA.\n"
+            "• **Quiero comprar, negociar o consultar algo particular:** abre un ticket.\n"
+            "• **No aparece un botón o no responde:** avisa al personal e indica qué botón pulsaste y qué ocurrió.\n\n"
+            "### 📌 Importante\n"
+            "Coutt & Schutz utiliza el bot para organizar el acceso, mostrar publicaciones y "
+            "facilitar la atención. La disponibilidad, los precios vigentes y las condiciones "
+            "de cualquier operación deben confirmarse con el equipo de la concesionaria.\n\n"
+            "-# Coutt & Schutz · Guía de uso V1"
+        ),
+    ]
+
+
+async def ensure_v1_guide_post():
+    """Publica la guía una vez y evita duplicarla al reiniciar el bot."""
+    channel = bot.get_channel(GUIDE_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(GUIDE_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception("No se pudo acceder al canal de la guía V1.")
+            return
+
+    try:
+        async for message in channel.history(limit=100):
+            if message.author.id == bot.user.id and GUIDE_MARKER in message.content:
+                logger.info("La guía V1 ya está publicada; no se duplica.")
+                return
+
+        messages = build_v1_guide_messages()
+        for index, content in enumerate(messages, start=1):
+            if len(content) > 2000:
+                logger.error("El mensaje %s de la guía supera el límite de Discord (%s caracteres).", index, len(content))
+                return
+
+        for content in messages:
+            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+
+        logger.info("Guía de uso V1 publicada en el canal %s.", GUIDE_CHANNEL_ID)
+
+    except discord.Forbidden:
+        logger.error(
+            "No se pudo publicar la guía V1. Comprueba que el bot tenga permisos "
+            "para ver el canal, enviar mensajes y leer el historial."
+        )
+    except discord.HTTPException:
+        logger.exception("Error al publicar la guía de uso V1.")
+
+
 # ============================================================
 # INICIO
 # ============================================================
@@ -1724,6 +1866,7 @@ async def on_ready():
     await ensure_ticket_panel()
     await ensure_verification_panel()
     await ensure_invite_panel()
+    await ensure_v1_guide_post()
 
 
 def main():
