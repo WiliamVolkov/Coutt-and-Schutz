@@ -32,6 +32,18 @@ GUIDE_CHANNEL_ID = 1560795723057070170
 GUIDE_MARKER = "COUTT_SCHUTZ_GUIDE_V1_2026"
 PUBLIC_ROLE_ID = 1558774898103685131
 
+# Lista pública de trabajadores de la concesionaria.
+WORKERS_CHANNEL_ID = 1560902787837988954
+WORKERS_BASE_ROLE_ID = 1558775758904893501
+WORKERS_LIST_MARKER = "COUTT_SCHUTZ_WORKERS_LIST_V1"
+WORKER_RANKS = [
+    (1558775707637645393, "👑 Dueño"),
+    (1558775031113326613, "💼 Gerente"),
+    (1558775293269901332, "🌎 Encargado regional"),
+    (1558775198642212895, "📋 Jefe de vendedores"),
+    (1558774946128465980, "🤝 Vendedor"),
+]
+
 # Sistema de verificación.
 VERIFICATION_CHANNEL_ID = 1560779383055327262
 VERIFIED_ROLE_ID = 1558774898103685131
@@ -1519,6 +1531,7 @@ async def on_member_join(member: discord.Member):
             logger.exception(
                 "No se pudo acceder al canal de bienvenida."
             )
+            await update_workers_list(member.guild)
             return
 
     container = discord.ui.Container(accent_colour=WELCOME_COLOR)
@@ -1559,6 +1572,8 @@ async def on_member_join(member: discord.Member):
         )
     except discord.HTTPException:
         logger.exception("No se pudo enviar la bienvenida.")
+
+    await update_workers_list(member.guild)
 
 
 # ============================================================
@@ -1850,6 +1865,123 @@ async def ensure_v1_guide_post():
         logger.exception("Error al publicar la guía de uso V1.")
 
 
+
+# ============================================================
+# LISTA PÚBLICA DE TRABAJADORES
+# ============================================================
+
+def build_workers_embed(guild):
+    """Construye el listado público usando los roles actuales de cada miembro."""
+    embed = discord.Embed(
+        title="👥 TRABAJADORES | COUTT & SCHUTZ",
+        description=(
+            "Equipo oficial de la concesionaria. Los trabajadores se organizan "
+            "según el rango que tengan asignado en el servidor."
+        ),
+        colour=PANEL_COLOR,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    staff_role = guild.get_role(WORKERS_BASE_ROLE_ID)
+    if staff_role is None:
+        embed.description = "No se encontró el rol base de trabajadores. Contacta con la administración."
+        embed.set_footer(text=WORKERS_LIST_MARKER)
+        return embed
+
+    staff_members = [
+        member for member in guild.members
+        if not member.bot and staff_role in member.roles
+    ]
+    assigned_ids = {role_id for role_id, _ in WORKER_RANKS}
+
+    for role_id, label in WORKER_RANKS:
+        role = guild.get_role(role_id)
+        members = [
+            member for member in staff_members
+            if any(r.id == role_id for r in member.roles)
+        ]
+        # Si alguien tiene varios rangos, se muestra en cada rango que tenga.
+        names = sorted((member.display_name for member in members), key=str.casefold)
+        value = "\n".join(f"• {name}" for name in names) if names else "*Sin trabajadores asignados*"
+        embed.add_field(name=label, value=value[:1024], inline=False)
+
+    unranked = [
+        member for member in staff_members
+        if not any(role.id in assigned_ids for role in member.roles)
+    ]
+    if unranked:
+        names = sorted((member.display_name for member in unranked), key=str.casefold)
+        embed.add_field(
+            name="👤 Sin rango asignado",
+            value="\n".join(f"• {name}" for name in names)[:1024],
+            inline=False,
+        )
+
+    if not staff_members:
+        embed.add_field(
+            name="Equipo",
+            value="*Todavía no hay trabajadores con el rol correspondiente.*",
+            inline=False,
+        )
+
+    embed.set_footer(text=f"{WORKERS_LIST_MARKER} · Se actualiza automáticamente")
+    return embed
+
+
+async def update_workers_list(guild=None):
+    """Crea la lista una sola vez y edita ese mismo mensaje en futuras actualizaciones."""
+    if guild is None:
+        guild = bot.guilds[0] if bot.guilds else None
+    if guild is None:
+        logger.warning("No hay un servidor disponible para actualizar la lista de trabajadores.")
+        return
+
+    channel = bot.get_channel(WORKERS_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WORKERS_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception("No se pudo acceder al canal de trabajadores.")
+            return
+
+    try:
+        # Completa la caché de miembros para que la lista no quede incompleta al iniciar.
+        try:
+            async for _member in guild.fetch_members(limit=None):
+                pass
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning("No se pudieron cargar todos los miembros; se usará la caché disponible.")
+
+        embed = build_workers_embed(guild)
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            if any(e.footer and WORKERS_LIST_MARKER in (e.footer.text or "") for e in message.embeds):
+                await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                logger.info("Lista de trabajadores actualizada en el mensaje existente.")
+                return
+
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        logger.info("Lista de trabajadores publicada en el canal %s.", WORKERS_CHANNEL_ID)
+    except discord.Forbidden:
+        logger.error("El bot necesita ver el canal de trabajadores, enviar mensajes y leer el historial.")
+    except discord.HTTPException:
+        logger.exception("Error al actualizar la lista de trabajadores.")
+
+
+@bot.event
+async def on_member_update(before, after):
+    relevant_role_ids = {WORKERS_BASE_ROLE_ID, *(role_id for role_id, _ in WORKER_RANKS)}
+    before_roles = {role.id for role in before.roles if role.id in relevant_role_ids}
+    after_roles = {role.id for role in after.roles if role.id in relevant_role_ids}
+    if before_roles != after_roles or before.display_name != after.display_name:
+        await update_workers_list(after.guild)
+
+
+@bot.event
+async def on_member_remove(member):
+    await update_workers_list(member.guild)
+
 # ============================================================
 # INICIO
 # ============================================================
@@ -1867,6 +1999,7 @@ async def on_ready():
     await ensure_verification_panel()
     await ensure_invite_panel()
     await ensure_v1_guide_post()
+    await update_workers_list()
 
 
 def main():
