@@ -1871,20 +1871,16 @@ async def ensure_v1_guide_post():
 # ============================================================
 
 def build_workers_embed(guild):
-    """Construye el listado público usando los roles actuales de cada miembro."""
+    """Construye una lista minimalista: un trabajador por línea, con su rango."""
     embed = discord.Embed(
         title="👥 TRABAJADORES | COUTT & SCHUTZ",
-        description=(
-            "Equipo oficial de la concesionaria. Los trabajadores se organizan "
-            "según el rango que tengan asignado en el servidor."
-        ),
         colour=PANEL_COLOR,
         timestamp=datetime.now(timezone.utc),
     )
 
     staff_role = guild.get_role(WORKERS_BASE_ROLE_ID)
     if staff_role is None:
-        embed.description = "No se encontró el rol base de trabajadores. Contacta con la administración."
+        embed.description = "No hay trabajadores para mostrar."
         embed.set_footer(text=WORKERS_LIST_MARKER)
         return embed
 
@@ -1892,37 +1888,31 @@ def build_workers_embed(guild):
         member for member in guild.members
         if not member.bot and staff_role in member.roles
     ]
-    assigned_ids = {role_id for role_id, _ in WORKER_RANKS}
 
-    for role_id, label in WORKER_RANKS:
-        role = guild.get_role(role_id)
-        members = [
-            member for member in staff_members
-            if any(r.id == role_id for r in member.roles)
-        ]
-        # Si alguien tiene varios rangos, se muestra en cada rango que tenga.
-        names = sorted((member.display_name for member in members), key=str.casefold)
-        value = "\n".join(f"• {name}" for name in names) if names else "*Sin trabajadores asignados*"
-        embed.add_field(name=label, value=value[:1024], inline=False)
+    # El orden de WORKER_RANKS define la jerarquía. Si una persona tiene
+    # varios rangos, se muestra una sola vez con el rango más alto.
+    rank_by_id = {role_id: label for role_id, label in WORKER_RANKS}
+    rank_order = {role_id: index for index, (role_id, _label) in enumerate(WORKER_RANKS)}
+    entries = []
+    for member in staff_members:
+        member_rank_ids = [role.id for role in member.roles if role.id in rank_by_id]
+        if member_rank_ids:
+            highest_rank_id = min(member_rank_ids, key=lambda role_id: rank_order[role_id])
+            rank_label = rank_by_id[highest_rank_id]
+            rank_index = rank_order[highest_rank_id]
+        else:
+            rank_label = "Sin rango asignado"
+            rank_index = len(WORKER_RANKS)
+        entries.append((rank_index, member.display_name.casefold(), member.display_name, rank_label))
 
-    unranked = [
-        member for member in staff_members
-        if not any(role.id in assigned_ids for role in member.roles)
-    ]
-    if unranked:
-        names = sorted((member.display_name for member in unranked), key=str.casefold)
-        embed.add_field(
-            name="👤 Sin rango asignado",
-            value="\n".join(f"• {name}" for name in names)[:1024],
-            inline=False,
+    entries.sort(key=lambda item: (item[0], item[1]))
+    if entries:
+        embed.description = "\n".join(
+            f"• **{name}** — {rank_label}"
+            for _rank_index, _sort_name, name, rank_label in entries
         )
-
-    if not staff_members:
-        embed.add_field(
-            name="Equipo",
-            value="*Todavía no hay trabajadores con el rol correspondiente.*",
-            inline=False,
-        )
+    else:
+        embed.description = "*No hay trabajadores asignados.*"
 
     embed.set_footer(text=f"{WORKERS_LIST_MARKER} · Se actualiza automáticamente")
     return embed
