@@ -145,7 +145,8 @@ class CouttSchutzBot(commands.Bot):
             USED_VEHICLES_CHANNEL_ID,
             IMPORTED_VEHICLES_CHANNEL_ID,
             ticket_channel_id=TICKET_PANEL_CHANNEL_ID,
-            categories=[name for name, _ in VEHICLE_CATEGORIES]
+            categories=[name for name, _ in VEHICLE_CATEGORIES],
+            staff_channel_id=WORKERS_CHANNEL_ID
         )
 
 
