@@ -68,6 +68,8 @@ VEHICLE_CATEGORIES = [
     ("Sedanes", "🚗"),
     ("Camionetas", "🛻"),
     ("Motocicletas", "🏍️"),
+    ("Aéreos", "✈️"),
+    ("Barcos", "🚤"),
 ]
 
 logging.basicConfig(level=logging.INFO)
