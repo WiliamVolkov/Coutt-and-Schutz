@@ -37,11 +37,11 @@ WORKERS_CHANNEL_ID = 1560902787837988954
 WORKERS_BASE_ROLE_ID = 1558775758904893501
 WORKERS_LIST_MARKER = "COUTT_SCHUTZ_WORKERS_LIST_V1"
 WORKER_RANKS = [
-    (1558775707637645393, "👑 Dueño"),
-    (1558775031113326613, "💼 Gerente"),
-    (1558775293269901332, "🌎 Encargado regional"),
-    (1558775198642212895, "📋 Jefe de vendedores"),
-    (1558774946128465980, "🤝 Vendedor"),
+    (1558775707637645393, "Dueño"),
+    (1558775031113326613, "Gerente"),
+    (1558775293269901332, "Encargado regional"),
+    (1558775198642212895, "Jefe de vendedores"),
+    (1558774946128465980, "Vendedor"),
 ]
 
 # Sistema de verificación.
@@ -1873,7 +1873,7 @@ async def ensure_v1_guide_post():
 def build_workers_embed(guild):
     """Construye una lista minimalista: un trabajador por línea, con su rango."""
     embed = discord.Embed(
-        title="👥 TRABAJADORES | COUTT & SCHUTZ",
+        title="TRABAJADORES | COUTT & SCHUTZ",
         colour=PANEL_COLOR,
         timestamp=datetime.now(timezone.utc),
     )
@@ -1881,7 +1881,6 @@ def build_workers_embed(guild):
     staff_role = guild.get_role(WORKERS_BASE_ROLE_ID)
     if staff_role is None:
         embed.description = "No hay trabajadores para mostrar."
-        embed.set_footer(text=WORKERS_LIST_MARKER)
         return embed
 
     staff_members = [
@@ -1914,7 +1913,6 @@ def build_workers_embed(guild):
     else:
         embed.description = "*No hay trabajadores asignados.*"
 
-    embed.set_footer(text=f"{WORKERS_LIST_MARKER} · Se actualiza automáticamente")
     return embed
 
 
@@ -1946,7 +1944,7 @@ async def update_workers_list(guild=None):
         async for message in channel.history(limit=100):
             if message.author.id != bot.user.id:
                 continue
-            if any(e.footer and WORKERS_LIST_MARKER in (e.footer.text or "") for e in message.embeds):
+            if any(e.title == "TRABAJADORES | COUTT & SCHUTZ" for e in message.embeds):
                 await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 logger.info("Lista de trabajadores actualizada en el mensaje existente.")
                 return
