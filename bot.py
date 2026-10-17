@@ -36,6 +36,10 @@ PUBLIC_ROLE_ID = 1558774898103685131
 WORKERS_CHANNEL_ID = 1560902787837988954
 WORKERS_BASE_ROLE_ID = 1558775758904893501
 WORKERS_LIST_MARKER = "COUTT_SCHUTZ_WORKERS_LIST_V1"
+
+# Lista de vehiculos del concesionario predefinido por el sistema del
+# servidor de rol. NO se venden aqui: la IA los usa solo como referencia.
+SYSTEM_DEALER_CHANNEL_ID = 1560933334253703188
 WORKER_RANKS = [
     (1558775707637645393, "Dueño"),
     (1558775031113326613, "Gerente"),
@@ -146,7 +150,8 @@ class CouttSchutzBot(commands.Bot):
             IMPORTED_VEHICLES_CHANNEL_ID,
             ticket_channel_id=TICKET_PANEL_CHANNEL_ID,
             categories=[name for name, _ in VEHICLE_CATEGORIES],
-            staff_channel_id=WORKERS_CHANNEL_ID
+            staff_channel_id=WORKERS_CHANNEL_ID,
+            system_channel_id=SYSTEM_DEALER_CHANNEL_ID
         )
 
 
