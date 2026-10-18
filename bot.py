@@ -974,6 +974,7 @@ async def ensure_panel():
 
 orders_lock = asyncio.Lock()
 orders_data = {"next_id": 1, "orders": []}
+ORDERS_STORAGE_READY = False
 
 def _postgres_connect():
     """Abre una conexión PostgreSQL usando psycopg 3."""
@@ -981,8 +982,9 @@ def _postgres_connect():
     return psycopg.connect(DATABASE_URL, connect_timeout=10)
 
 def load_orders():
-    """Carga la cola desde PostgreSQL; usa JSON solo como respaldo de desarrollo."""
-    global orders_data
+    """Carga la cola y marca el almacenamiento como listo solo si la carga es segura."""
+    global orders_data, ORDERS_STORAGE_READY
+    ORDERS_STORAGE_READY = False
     if DATABASE_URL:
         try:
             with _postgres_connect() as conn:
@@ -1008,10 +1010,14 @@ def load_orders():
                             "ON CONFLICT (id) DO NOTHING",
                             (json.dumps(orders_data, ensure_ascii=False),)
                         )
+            ORDERS_STORAGE_READY = True
             logger.info("Cola de pedidos cargada desde PostgreSQL (%s pedidos).", len(orders_data["orders"]))
             return
         except Exception:
-            logger.exception("No se pudo cargar la cola desde PostgreSQL. El bot continuará con la cola vacía/local; revisa DATABASE_URL y la dependencia psycopg.")
+            # No habilitar altas/entregas con una cola vacía si la DB falló:
+            # eso podría sobrescribir datos reales al guardar el siguiente cambio.
+            logger.exception("No se pudo cargar la cola desde PostgreSQL. El sistema de pedidos queda bloqueado para evitar pérdida de datos; revisa DATABASE_URL, conectividad y psycopg.")
+            ORDERS_STORAGE_READY = False
             return
 
     path = Path(PEDIDOS_DATA_FILE)
@@ -1020,12 +1026,16 @@ def load_orders():
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("orders"), list):
                 orders_data = {"next_id": int(data.get("next_id", 1)), "orders": data["orders"]}
+        ORDERS_STORAGE_READY = True
         logger.warning("DATABASE_URL no está configurada: la cola usa JSON local y puede perderse al reiniciar Render.")
     except (OSError, ValueError, TypeError):
-        logger.exception("No se pudo leer el archivo local de pedidos.")
+        ORDERS_STORAGE_READY = False
+        logger.exception("No se pudo leer el archivo local de pedidos. El sistema de pedidos queda bloqueado para evitar sobrescribir datos.")
 
 def save_orders():
-    """Guarda la cola en PostgreSQL, o en JSON local si no hay DB configurada."""
+    """Guarda la cola; no permite escribir hasta confirmar que la carga inicial fue segura."""
+    if not ORDERS_STORAGE_READY:
+        raise RuntimeError("El almacenamiento de pedidos no está listo; se bloquea la escritura para proteger los datos existentes.")
     if DATABASE_URL:
         with _postgres_connect() as conn:
             with conn.cursor() as cur:
@@ -1178,7 +1188,9 @@ async def refresh_orders_queue(guild=None):
         # Se revisa el historial incluso cuando PostgreSQL ya conoce el ID:
         # así se eliminan duplicados y eventos individuales antiguos en cada arranque.
         try:
-            async for message in channel.history(limit=None):
+            # Límite defensivo: evita recorrer un historial completo en cada cambio.
+            # El ID persistido sigue siendo la fuente principal para reutilizar la lista.
+            async for message in channel.history(limit=200):
                 if message.author.id != bot.user.id:
                     continue
                 titles = [e.title or "" for e in message.embeds]
@@ -1292,6 +1304,14 @@ class RegisterOrderModal(discord.ui.Modal, title="Registrar pedido por encargo")
             await interaction.response.send_message("No pude identificar al cliente dueño de este ticket.", ephemeral=True)
             return
 
+        if not ORDERS_STORAGE_READY:
+            await interaction.response.send_message(
+                "El sistema de pedidos no puede confirmar el almacenamiento en este momento. "
+                "No se registró el pedido para evitar perder información; avisa a un administrador.",
+                ephemeral=True
+            )
+            return
+
         model_name = str(self.model.value).strip()
         async with orders_lock:
             # Cuando la cola está vacía, comienza una nueva numeración desde #1.
@@ -1389,6 +1409,12 @@ async def pedido_cola(interaction: discord.Interaction):
 async def pedido_entregar(interaction: discord.Interaction, numero: app_commands.Range[int, 1, 1000000]):
     if not is_ticket_staff(interaction.user):
         await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede marcar pedidos como entregados.", ephemeral=True)
+        return
+    if not ORDERS_STORAGE_READY:
+        await interaction.response.send_message(
+            "El almacenamiento de pedidos no está disponible. No se modificó el pedido; avisa a un administrador.",
+            ephemeral=True
+        )
         return
     async with orders_lock:
         order = next((o for o in orders_data["orders"] if int(o.get("id", 0)) == numero), None)
