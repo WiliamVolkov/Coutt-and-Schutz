@@ -4,7 +4,10 @@ import asyncio
 import logging
 import threading
 import re
+import json
+from pathlib import Path
 from datetime import datetime, timezone
+from discord import app_commands
 
 import discord
 from discord.ext import commands
@@ -71,6 +74,16 @@ TICKET_STAFF_ROLE_ID = 1558775758904893501
 TICKET_OPEN_ID = "coutt_schutz:ticket_open"
 TICKET_CLOSE_ID = "coutt_schutz:ticket_close"
 TICKET_TOPIC_PREFIX = "ticket:"  # el tema del canal guarda el ID del dueño
+
+# Sistema de pedidos por encargo.
+# DATABASE_URL debe apuntar a PostgreSQL (por ejemplo, una base gratuita externa).
+# ORDER_LOG_CHANNEL_ID es un canal privado de Discord para el historial auxiliar.
+# El JSON local solo se usa como modo de prueba si no se configura DATABASE_URL.
+PEDIDOS_DATA_FILE = os.getenv("PEDIDOS_DATA_FILE", "pedidos_encargo.json")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+ORDER_LOG_CHANNEL_ID = int(os.getenv("ORDER_LOG_CHANNEL_ID", "0") or "0")
+ORDER_REGISTER_BUTTON_ID = "coutt_schutz:order_register"
+ORDER_QUEUE_TITLE = "PEDIDOS POR ENCARGO | COUTT & SCHUTZ"
 
 IMAGE_WIDTH = 1600
 IMAGE_HEIGHT = 900
@@ -146,6 +159,7 @@ class CouttSchutzBot(commands.Bot):
         self.add_view(TicketPanelView())
         self.add_view(TicketControlView())
         self.add_view(VerificationPanelView())
+        await self.tree.sync()
 
         # Asistente de IA (mención o comando !ia).
         await setup_ai(
@@ -924,6 +938,308 @@ async def ensure_panel():
 
 
 # ============================================================
+# SISTEMA DE PEDIDOS POR ENCARGO
+# ============================================================
+
+orders_lock = asyncio.Lock()
+orders_data = {"next_id": 1, "orders": []}
+
+def _postgres_connect():
+    """Abre una conexión PostgreSQL usando psycopg 3."""
+    import psycopg
+    return psycopg.connect(DATABASE_URL, connect_timeout=10)
+
+def load_orders():
+    """Carga la cola desde PostgreSQL; usa JSON solo como respaldo de desarrollo."""
+    global orders_data
+    if DATABASE_URL:
+        try:
+            with _postgres_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "CREATE TABLE IF NOT EXISTS coutt_schutz_order_state ("
+                        "id INTEGER PRIMARY KEY CHECK (id = 1), state JSONB NOT NULL)"
+                    )
+                    cur.execute("SELECT state FROM coutt_schutz_order_state WHERE id = 1")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        state = row[0]
+                        if isinstance(state, str):
+                            state = json.loads(state)
+                        if isinstance(state, dict) and isinstance(state.get("orders"), list):
+                            orders_data = {
+                                "next_id": int(state.get("next_id", 1)),
+                                "orders": state["orders"]
+                            }
+                    else:
+                        cur.execute(
+                            "INSERT INTO coutt_schutz_order_state (id, state) VALUES (1, %s::jsonb) "
+                            "ON CONFLICT (id) DO NOTHING",
+                            (json.dumps(orders_data, ensure_ascii=False),)
+                        )
+            logger.info("Cola de pedidos cargada desde PostgreSQL (%s pedidos).", len(orders_data["orders"]))
+            return
+        except Exception:
+            logger.exception("No se pudo cargar la cola desde PostgreSQL. El bot continuará con la cola vacía/local; revisa DATABASE_URL y la dependencia psycopg.")
+            return
+
+    path = Path(PEDIDOS_DATA_FILE)
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("orders"), list):
+                orders_data = {"next_id": int(data.get("next_id", 1)), "orders": data["orders"]}
+        logger.warning("DATABASE_URL no está configurada: la cola usa JSON local y puede perderse al reiniciar Render.")
+    except (OSError, ValueError, TypeError):
+        logger.exception("No se pudo leer el archivo local de pedidos.")
+
+def save_orders():
+    """Guarda la cola en PostgreSQL, o en JSON local si no hay DB configurada."""
+    if DATABASE_URL:
+        with _postgres_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO coutt_schutz_order_state (id, state) VALUES (1, %s::jsonb) "
+                    "ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state",
+                    (json.dumps(orders_data, ensure_ascii=False),)
+                )
+        return
+    path = Path(PEDIDOS_DATA_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(orders_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+async def log_order_event(guild, title, description, order=None):
+    """Registra los cambios en el canal privado de auditoría de Discord."""
+    if not ORDER_LOG_CHANNEL_ID or guild is None:
+        logger.warning("ORDER_LOG_CHANNEL_ID no configurado; no se publicó el registro auxiliar de pedidos.")
+        return
+    channel = guild.get_channel(ORDER_LOG_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(ORDER_LOG_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            logger.warning("No se pudo acceder al canal de registro de pedidos %s.", ORDER_LOG_CHANNEL_ID)
+            return
+    embed = discord.Embed(title=title, description=description, colour=COLOR_IMPORTED, timestamp=datetime.now(timezone.utc))
+    if order:
+        embed.add_field(name="Pedido", value=f"#{order.get('id')} · {order.get('model', 'Modelo desconocido')}", inline=False)
+        embed.add_field(name="Cliente", value=f"<@{order.get('customer_id')}>", inline=True)
+        if order.get("ticket_url"):
+            embed.add_field(name="Ticket", value=f"[Abrir ticket]({order['ticket_url']})", inline=True)
+        embed.add_field(name="Estado", value=order.get("status", "desconocido").capitalize(), inline=True)
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except (discord.Forbidden, discord.HTTPException):
+        logger.exception("No se pudo escribir en el canal privado de registro de pedidos.")
+
+
+def is_ticket_staff(member):
+    return is_admin(member) or (
+        isinstance(member, discord.Member)
+        and any(role.id == TICKET_STAFF_ROLE_ID for role in member.roles)
+    )
+
+
+def get_ticket_owner_id(channel):
+    topic = getattr(channel, "topic", None) or ""
+    if topic.startswith(TICKET_TOPIC_PREFIX):
+        try:
+            return int(topic[len(TICKET_TOPIC_PREFIX):])
+        except ValueError:
+            return None
+    return None
+
+
+def build_orders_embed():
+    embed = discord.Embed(
+        title=ORDER_QUEUE_TITLE,
+        description=(
+            "Cola general de vehículos importados por encargo, ordenada "
+            "por fecha de registro. Los pedidos se reservan y se gestionan "
+            "por orden de llegada."
+        ),
+        colour=COLOR_IMPORTED,
+        timestamp=datetime.now(timezone.utc)
+    )
+    pending = [o for o in orders_data["orders"] if o.get("status") == "pendiente"]
+    if not pending:
+        embed.add_field(name="Cola actual", value="No hay pedidos pendientes.", inline=False)
+    else:
+        lines = []
+        for order in pending[:25]:
+            customer = f"<@{order['customer_id']}>"
+            ticket = f"[Abrir ticket]({order['ticket_url']})" if order.get("ticket_url") else "Sin enlace"
+            lines.append(
+                f"**#{order['id']}** · {order['model']}\n"
+                f"Cliente: {customer} · {ticket}"
+            )
+        embed.add_field(name=f"Pendientes ({len(pending)})", value="\n\n".join(lines), inline=False)
+        if len(pending) > 25:
+            embed.set_footer(text=f"Mostrando 25 de {len(pending)} pedidos pendientes.")
+    return embed
+
+
+async def notify_customer(guild, customer_id, message):
+    member = guild.get_member(customer_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(customer_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            member = None
+    if member is not None:
+        try:
+            await member.send(message)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning("No se pudo enviar DM al cliente %s.", customer_id)
+    return False
+
+
+class RegisterOrderModal(discord.ui.Modal, title="Registrar pedido por encargo"):
+    model = discord.ui.TextInput(
+        label="Modelo del vehículo solicitado",
+        placeholder="Ej.: Pfister Comet S2",
+        max_length=100,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        guild = interaction.guild
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Este formulario solo funciona dentro de un ticket del servidor.", ephemeral=True)
+            return
+        if not is_ticket_staff(interaction.user):
+            await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede registrar pedidos.", ephemeral=True)
+            return
+        customer_id = get_ticket_owner_id(channel)
+        if customer_id is None:
+            await interaction.response.send_message("No pude identificar al cliente dueño de este ticket.", ephemeral=True)
+            return
+
+        model_name = str(self.model.value).strip()
+        async with orders_lock:
+            # Evita registrar dos veces el mismo modelo desde el mismo ticket.
+            duplicate = next((o for o in orders_data["orders"] if o.get("status") == "pendiente" and o.get("ticket_id") == channel.id and o.get("model", "").casefold() == model_name.casefold()), None)
+            if duplicate:
+                await interaction.response.send_message(f"Ese vehículo ya está en la cola para este ticket: pedido **#{duplicate['id']}**.", ephemeral=True)
+                return
+            order_id = int(orders_data["next_id"])
+            order = {
+                "id": order_id,
+                "customer_id": customer_id,
+                "model": model_name,
+                "ticket_id": channel.id,
+                "ticket_url": channel.jump_url,
+                "guild_id": guild.id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": interaction.user.id,
+                "status": "pendiente",
+                "delivered_at": None,
+                "delivered_by": None
+            }
+            orders_data["orders"].append(order)
+            orders_data["next_id"] = order_id + 1
+            try:
+                save_orders()
+            except Exception:
+                logger.exception("No se pudo persistir el nuevo pedido.")
+                orders_data["orders"].remove(order)
+                orders_data["next_id"] = order_id
+                await interaction.response.send_message("No pude guardar el pedido. Revisa el almacenamiento del bot e inténtalo otra vez.", ephemeral=True)
+                return
+
+        await interaction.response.send_message(f"Pedido **#{order_id}** registrado en la cola general. Cliente: <@{customer_id}> · Vehículo: **{model_name}**. El enlace de este ticket quedó guardado.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await notify_customer(
+            guild, customer_id,
+            f"🧾 **Coutt & Schutz | Pedido por encargo registrado**\n\n"
+            f"Tu solicitud de **{model_name}** quedó registrada con el número **#{order_id}**. "
+            "Los pedidos se gestionan por orden de llegada. El equipo te avisará cuando esté entregado.\n\n"
+            f"Ticket de seguimiento: {channel.jump_url}"
+        )
+        await channel.send(
+            f"🧾 Pedido **#{order_id}** registrado por {interaction.user.mention}: **{model_name}**. "
+            f"Enlace guardado en la cola: {channel.jump_url}",
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+        await log_order_event(
+            guild, "📦 Pedido por encargo registrado",
+            f"Registrado por <@{interaction.user.id}>.", order
+        )
+
+
+class RegisterOrderButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Registrar pedido por encargo", emoji="📦", style=discord.ButtonStyle.success, custom_id=ORDER_REGISTER_BUTTON_ID)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not isinstance(interaction.channel, discord.TextChannel) or get_ticket_owner_id(interaction.channel) is None:
+            await interaction.response.send_message("Este botón solo se puede usar dentro de un ticket válido.", ephemeral=True)
+            return
+        if not is_ticket_staff(interaction.user):
+            await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede registrar pedidos por encargo.", ephemeral=True)
+            return
+        await interaction.response.send_modal(RegisterOrderModal())
+
+
+@bot.tree.command(name="pedido_cola", description="Muestra los pedidos por encargo pendientes, en orden de llegada.")
+async def pedido_cola(interaction: discord.Interaction):
+    if not is_ticket_staff(interaction.user):
+        await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede consultar la cola.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_orders_embed(), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="pedido_entregar", description="Marca un pedido por encargo como entregado y avisa al cliente.")
+@app_commands.describe(numero="Número de pedido registrado en la cola")
+async def pedido_entregar(interaction: discord.Interaction, numero: app_commands.Range[int, 1, 1000000]):
+    if not is_ticket_staff(interaction.user):
+        await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede marcar pedidos como entregados.", ephemeral=True)
+        return
+    async with orders_lock:
+        order = next((o for o in orders_data["orders"] if int(o.get("id", 0)) == numero), None)
+        if order is None:
+            await interaction.response.send_message(f"No existe el pedido **#{numero}**.", ephemeral=True)
+            return
+        if order.get("status") == "entregado":
+            await interaction.response.send_message(f"El pedido **#{numero}** ya estaba marcado como entregado.", ephemeral=True)
+            return
+        order["status"] = "entregado"
+        order["delivered_at"] = datetime.now(timezone.utc).isoformat()
+        order["delivered_by"] = interaction.user.id
+        try:
+            save_orders()
+        except OSError:
+            order["status"] = "pendiente"
+            order["delivered_at"] = None
+            order["delivered_by"] = None
+            await interaction.response.send_message("No pude guardar el cambio. Revisa el almacenamiento e inténtalo otra vez.", ephemeral=True)
+            return
+
+    guild = interaction.guild
+    notified = False
+    if guild is not None:
+        notified = await notify_customer(
+            guild, int(order["customer_id"]),
+            f"✅ **Coutt & Schutz | Pedido entregado**\n\n"
+            f"Tu pedido **#{numero}** del vehículo **{order['model']}** ha sido marcado como entregado. "
+            "¡Gracias por confiar en Coutt & Schutz!\n\n"
+            f"Ticket relacionado: {order.get('ticket_url', 'No disponible')}"
+        )
+    status = "Se envió la notificación por mensaje privado." if notified else "No se pudo enviar mensaje privado (el cliente puede tener los DM cerrados)."
+    await log_order_event(
+        guild, "✅ Pedido por encargo entregado",
+        f"Marcado como entregado por <@{interaction.user.id}>.", order
+    )
+    await interaction.response.send_message(f"Pedido **#{numero}** marcado como entregado. {status}", ephemeral=True)
+
+
+load_orders()
+
+
+# ============================================================
 # SISTEMA DE TICKETS
 # ============================================================
 
@@ -1075,7 +1391,7 @@ class TicketControlView(discord.ui.LayoutView):
             ))
 
         container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.ActionRow(CloseTicketButton()))
+        container.add_item(discord.ui.ActionRow(RegisterOrderButton(), CloseTicketButton()))
 
         self.add_item(container)
 
