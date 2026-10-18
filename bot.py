@@ -172,11 +172,36 @@ class CouttSchutzBot(commands.Bot):
             staff_channel_id=WORKERS_CHANNEL_ID,
             system_channel_id=SYSTEM_DEALER_CHANNEL_ID
         )
-        # Publicar el árbol actual como comandos globales.
-        # Los comandos antiguos limitados a un servidor se limpian en on_ready,
-        # cuando Discord ya ha cargado la lista de servidores.
+        # IMPORTANTE: eliminar los comandos registrados en el ámbito del servidor
+        # antes de sincronizar los globales. Discord puede mostrar simultáneamente
+        # un comando global y otro antiguo de servidor con el mismo nombre.
+        # ID del servidor Coutt & Schutz (el primer ID de la URL de un canal).
+        target_guild = discord.Object(id=1558770815678283868)
+        try:
+            self.tree.clear_commands(guild=target_guild)
+            guild_synced = await self.tree.sync(guild=target_guild)
+            logger.info(
+                "Sincronización de comandos específicos del servidor completada: %s comandos restantes.",
+                len(guild_synced)
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "No se pudieron limpiar los comandos antiguos del servidor %s.",
+                target_guild.id
+            )
+            raise
+
+        # Sincronizar el conjunto actual de comandos globales. Esta operación
+        # reemplaza en Discord la lista global de ESTA aplicación.
         synced = await self.tree.sync()
-        logger.info("Se sincronizaron %s comandos globales de aplicación.", len(synced))
+        local_names = sorted(command.name for command in self.tree.get_commands())
+        logger.info(
+            "SYNC COMPLETADO | bot=%s | application_id=%s | globales=%s | nombres=%s",
+            getattr(self.user, "id", "aún no disponible"),
+            self.application_id,
+            len(synced),
+            local_names
+        )
 
 
 bot = CouttSchutzBot(
@@ -2545,25 +2570,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @bot.event
 async def on_ready():
-    # Limpia comandos antiguos que se registraron solo a nivel de servidor.
-    # La versión actual usa comandos globales; limpiar el alcance de servidor
-    # elimina definiciones antiguas como /pedido que causan CommandNotFound.
-    if not getattr(bot, "_cleaned_legacy_guild_commands", False):
-        for guild in bot.guilds:
-            try:
-                bot.tree.clear_commands(guild=guild)
-                removed = await bot.tree.sync(guild=guild)
-                logger.info(
-                    "Comandos antiguos de servidor limpiados en %s (%s); quedan %s comandos específicos.",
-                    guild.name, guild.id, len(removed)
-                )
-            except discord.HTTPException:
-                logger.exception(
-                    "No se pudieron limpiar los comandos antiguos en %s (%s).",
-                    guild.name, guild.id
-                )
-        bot._cleaned_legacy_guild_commands = True
-
     logger.info(
         "Bot conectado como %s (ID: %s)",
         bot.user,
