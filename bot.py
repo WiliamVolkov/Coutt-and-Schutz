@@ -172,22 +172,11 @@ class CouttSchutzBot(commands.Bot):
             staff_channel_id=WORKERS_CHANNEL_ID,
             system_channel_id=SYSTEM_DEALER_CHANNEL_ID
         )
-        await self.tree.sync()
-
-    async def on_ready(self):
-        # Elimina copias antiguas registradas con alcance de servidor (guild).
-        # Si quedan comandos globales y de servidor con el mismo nombre,
-        # Discord puede mostrarlos duplicados en el selector.
-        if getattr(self, "_cleaned_legacy_guild_commands", False):
-            return
-        for guild in self.guilds:
-            try:
-                self.tree.clear_commands(guild=guild)
-                await self.tree.sync(guild=guild)
-                logger.info("Comandos específicos antiguos limpiados en %s (%s).", guild.name, guild.id)
-            except discord.HTTPException:
-                logger.exception("No se pudieron limpiar los comandos duplicados en %s (%s).", guild.name, guild.id)
-        self._cleaned_legacy_guild_commands = True
+        # Publicar el árbol actual como comandos globales.
+        # Los comandos antiguos limitados a un servidor se limpian en on_ready,
+        # cuando Discord ya ha cargado la lista de servidores.
+        synced = await self.tree.sync()
+        logger.info("Se sincronizaron %s comandos globales de aplicación.", len(synced))
 
 
 bot = CouttSchutzBot(
@@ -1244,6 +1233,25 @@ class RegisterOrderButton(discord.ui.Button):
             await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede registrar pedidos por encargo.", ephemeral=True)
             return
         await interaction.response.send_modal(RegisterOrderModal())
+
+
+@bot.tree.command(name="pedido", description="Abre el formulario para registrar un vehículo por encargo en este ticket.")
+async def pedido(interaction: discord.Interaction):
+    """Alias slash para abrir el formulario de pedido desde un ticket válido."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel) or get_ticket_owner_id(channel) is None:
+        await interaction.response.send_message(
+            "Este comando solo funciona dentro de un ticket válido de Coutt & Schutz.",
+            ephemeral=True
+        )
+        return
+    if not is_ticket_staff(interaction.user):
+        await interaction.response.send_message(
+            "Solo el equipo de Coutt & Schutz puede registrar pedidos por encargo.",
+            ephemeral=True
+        )
+        return
+    await interaction.response.send_modal(RegisterOrderModal())
 
 
 @bot.tree.command(name="pedido_cola", description="Muestra los pedidos por encargo pendientes, en orden de llegada.")
@@ -2508,12 +2516,54 @@ async def on_member_update(before, after):
 async def on_member_remove(member):
     await update_workers_list(member.guild)
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Evita que un comando obsoleto deje la interacción sin respuesta."""
+    logger.error(
+        "Error al procesar comando de aplicación: %s",
+        error,
+        exc_info=(type(error), error, error.__traceback__)
+    )
+    if interaction.response.is_done():
+        return
+    if isinstance(error, app_commands.CommandNotFound):
+        message = (
+            "Este comando es una versión antigua y ya no está registrado. "
+            "Vuelve a escribir `/` y selecciona el comando actualizado."
+        )
+    else:
+        message = "Ocurrió un error al ejecutar el comando. El equipo técnico ya tiene el registro del fallo."
+    try:
+        await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        logger.exception("No se pudo responder a la interacción que falló.")
+
+
 # ============================================================
 # INICIO
 # ============================================================
 
 @bot.event
 async def on_ready():
+    # Limpia comandos antiguos que se registraron solo a nivel de servidor.
+    # La versión actual usa comandos globales; limpiar el alcance de servidor
+    # elimina definiciones antiguas como /pedido que causan CommandNotFound.
+    if not getattr(bot, "_cleaned_legacy_guild_commands", False):
+        for guild in bot.guilds:
+            try:
+                bot.tree.clear_commands(guild=guild)
+                removed = await bot.tree.sync(guild=guild)
+                logger.info(
+                    "Comandos antiguos de servidor limpiados en %s (%s); quedan %s comandos específicos.",
+                    guild.name, guild.id, len(removed)
+                )
+            except discord.HTTPException:
+                logger.exception(
+                    "No se pudieron limpiar los comandos antiguos en %s (%s).",
+                    guild.name, guild.id
+                )
+        bot._cleaned_legacy_guild_commands = True
+
     logger.info(
         "Bot conectado como %s (ID: %s)",
         bot.user,
