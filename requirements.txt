@@ -3,4 +3,4 @@ python-dotenv
 flask
 Pillow
 aiohttp
- 
+psycopg[binary]>=3.2
