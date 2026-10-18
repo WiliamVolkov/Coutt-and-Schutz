@@ -1197,10 +1197,13 @@ async def refresh_orders_queue(guild=None):
                             logger.info("Mensaje duplicado de la cola eliminado (%s).", message.id)
                         except discord.HTTPException:
                             logger.warning("No se pudo eliminar un mensaje duplicado antiguo de la cola.")
-                elif is_old_order_event and ORDER_LOG_CHANNEL_ID == ORDER_QUEUE_CHANNEL_ID:
+                elif is_old_order_event:
+                    # El canal configurado como cola debe contener únicamente el
+                    # mensaje-lista, sin importar si el ID del canal de auditoría
+                    # cambió en Render o quedó configurado incorrectamente.
                     try:
                         await message.delete()
-                        logger.info("Publicación individual antigua eliminada (%s).", message.id)
+                        logger.info("Publicación individual antigua eliminada del canal de cola (%s).", message.id)
                     except discord.HTTPException:
                         logger.warning("No se pudo eliminar una publicación individual antigua (%s).", message.id)
         except (discord.Forbidden, discord.HTTPException):
