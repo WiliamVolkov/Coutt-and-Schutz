@@ -1381,7 +1381,7 @@ async def pedido_cola(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_orders_embed(), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.tree.command(name="pedido_entregar", description="Marca un pedido por encargo como entregado y avisa al cliente.")
+@bot.tree.command(name="pedido_entregar", description="Marca un pedido por encargo como entregado y lo informa en el ticket.")
 @app_commands.describe(numero="Número de pedido registrado en la cola")
 async def pedido_entregar(interaction: discord.Interaction, numero: app_commands.Range[int, 1, 1000000]):
     if not is_ticket_staff(interaction.user):
@@ -1421,22 +1421,36 @@ async def pedido_entregar(interaction: discord.Interaction, numero: app_commands
             return
 
     guild = interaction.guild
-    notified = False
-    if guild is not None:
-        notified = await notify_customer(
-            guild, int(order["customer_id"]),
-            f"✅ **Coutt & Schutz | Pedido entregado**\n\n"
-            f"Tu pedido **#{numero}** del vehículo **{order['model']}** ha sido marcado como entregado. "
-            "¡Gracias por confiar en Coutt & Schutz!\n\n"
-            f"Ticket relacionado: {order.get('ticket_url', 'No disponible')}"
-        )
-    status = "Se envió la notificación por mensaje privado." if notified else "No se pudo enviar mensaje privado (el cliente puede tener los DM cerrados)."
+
+    # No se envían mensajes privados al cliente ni al registrar ni al entregar.
+    # La notificación de entrega se publica únicamente dentro del ticket original.
+    ticket_notified = False
+    if guild is not None and order.get("ticket_id"):
+        ticket_channel = guild.get_channel(int(order["ticket_id"]))
+        if ticket_channel is None:
+            try:
+                ticket_channel = await guild.fetch_channel(int(order["ticket_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                ticket_channel = None
+        if isinstance(ticket_channel, discord.TextChannel):
+            try:
+                await ticket_channel.send(
+                    f"✅ **Pedido #{numero} entregado**\n"
+                    f"El vehículo **{order['model']}** fue marcado como entregado por {interaction.user.mention}. "
+                    "¡Gracias por confiar en Coutt & Schutz!",
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+                ticket_notified = True
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception("No se pudo publicar la entrega en el ticket del pedido #%s.", numero)
+
     await log_order_event(
         guild, "✅ Pedido por encargo entregado",
         f"Marcado como entregado por <@{interaction.user.id}>.", order
     )
     await refresh_orders_queue(guild)
-    await interaction.response.send_message(f"Pedido **#{numero}** marcado como entregado. {status}", ephemeral=True)
+    ticket_status = "Se informó en el ticket." if ticket_notified else "El pedido se marcó como entregado, pero no se pudo publicar el aviso en el ticket."
+    await interaction.response.send_message(f"Pedido **#{numero}** marcado como entregado. {ticket_status}", ephemeral=True)
 
 
 load_orders()
