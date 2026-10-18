@@ -161,9 +161,8 @@ class CouttSchutzBot(commands.Bot):
         self.add_view(TicketPanelView())
         self.add_view(TicketControlView())
         self.add_view(VerificationPanelView())
-        await self.tree.sync()
-
-        # Asistente de IA (mención o comando !ia).
+        # Registrar primero todos los comandos, incluidos los del asistente,
+        # y después sincronizarlos como comandos globales.
         await setup_ai(
             self,
             USED_VEHICLES_CHANNEL_ID,
@@ -173,6 +172,22 @@ class CouttSchutzBot(commands.Bot):
             staff_channel_id=WORKERS_CHANNEL_ID,
             system_channel_id=SYSTEM_DEALER_CHANNEL_ID
         )
+        await self.tree.sync()
+
+    async def on_ready(self):
+        # Elimina copias antiguas registradas con alcance de servidor (guild).
+        # Si quedan comandos globales y de servidor con el mismo nombre,
+        # Discord puede mostrarlos duplicados en el selector.
+        if getattr(self, "_cleaned_legacy_guild_commands", False):
+            return
+        for guild in self.guilds:
+            try:
+                self.tree.clear_commands(guild=guild)
+                await self.tree.sync(guild=guild)
+                logger.info("Comandos específicos antiguos limpiados en %s (%s).", guild.name, guild.id)
+            except discord.HTTPException:
+                logger.exception("No se pudieron limpiar los comandos duplicados en %s (%s).", guild.name, guild.id)
+        self._cleaned_legacy_guild_commands = True
 
 
 bot = CouttSchutzBot(
