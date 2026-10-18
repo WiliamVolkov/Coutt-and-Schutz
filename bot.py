@@ -1326,13 +1326,8 @@ class RegisterOrderModal(discord.ui.Modal, title="Registrar pedido por encargo")
                 return
 
         await interaction.response.send_message(f"Pedido **#{order_id}** registrado en la cola general. Cliente: <@{customer_id}> · Vehículo: **{model_name}**. El enlace de este ticket quedó guardado.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
-        await notify_customer(
-            guild, customer_id,
-            f"🧾 **Coutt & Schutz | Pedido por encargo registrado**\n\n"
-            f"Tu solicitud de **{model_name}** quedó registrada con el número **#{order_id}**. "
-            "Los pedidos se gestionan por orden de llegada. El equipo te avisará cuando esté entregado.\n\n"
-            f"Ticket de seguimiento: {channel.jump_url}"
-        )
+        # No se envía DM al cliente al añadir el pedido a la cola.
+        # La confirmación visible para el cliente se publica únicamente en este ticket.
         await channel.send(
             f"🧾 Pedido **#{order_id}** registrado por {interaction.user.mention}: **{model_name}**. "
             f"Enlace guardado en la cola: {channel.jump_url}",
