@@ -2537,6 +2537,10 @@ async def on_member_remove(member):
 # INICIO
 # ============================================================
 
+# Evita repetir la sincronización de comandos de servidor en reconexiones.
+_synced_guild_commands: set[int] = set()
+
+
 @bot.event
 async def on_ready():
     logger.info(
@@ -2544,6 +2548,29 @@ async def on_ready():
         bot.user,
         bot.user.id
     )
+
+    # Los comandos globales de Discord pueden tardar en aparecer.
+    # Copiarlos y sincronizarlos en el servidor conectado hace que /pedido
+    # y los demás comandos de aplicación estén disponibles inmediatamente.
+    for guild in bot.guilds:
+        if guild.id in _synced_guild_commands:
+            continue
+        try:
+            bot.tree.copy_global_to(guild=discord.Object(id=guild.id))
+            synced = await bot.tree.sync(guild=discord.Object(id=guild.id))
+            _synced_guild_commands.add(guild.id)
+            logger.info(
+                "Comandos de aplicación sincronizados en %s (%s): %s comandos",
+                guild.name,
+                guild.id,
+                len(synced)
+            )
+        except Exception:
+            logger.exception(
+                "No se pudieron sincronizar los comandos en %s (%s).",
+                guild.name,
+                guild.id
+            )
 
     await ensure_panel()
     await ensure_ticket_panel()
