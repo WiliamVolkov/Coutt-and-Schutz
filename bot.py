@@ -1046,6 +1046,16 @@ async def log_order_event(guild, title, description, order=None):
     if not ORDER_LOG_CHANNEL_ID or guild is None:
         logger.warning("ORDER_LOG_CHANNEL_ID no configurado; no se publicó el registro auxiliar de pedidos.")
         return
+
+    # El canal de la cola debe contener solo el mensaje-lista. Si el canal de
+    # auditoría coincide con él, no se publican allí eventos individuales.
+    if ORDER_LOG_CHANNEL_ID == ORDER_QUEUE_CHANNEL_ID:
+        logger.info(
+            "Registro auxiliar omitido porque ORDER_LOG_CHANNEL_ID coincide con "
+            "ORDER_QUEUE_CHANNEL_ID; se conserva el canal como lista única."
+        )
+        return
+
     channel = guild.get_channel(ORDER_LOG_CHANNEL_ID)
     if channel is None:
         try:
@@ -1165,24 +1175,37 @@ async def refresh_orders_queue(guild=None):
             except (discord.Forbidden, discord.HTTPException):
                 logger.exception("No se pudo comprobar el mensaje guardado de la cola.")
 
-        # Compatibilidad con mensajes publicados antes de guardar el ID. Se busca
-        # en el historial para reutilizar el mensaje y evitar duplicados.
-        if existing is None:
-            try:
-                async for message in channel.history(limit=None):
-                    if message.author.id != bot.user.id:
-                        continue
-                    if any(e.title == ORDER_QUEUE_TITLE for e in message.embeds):
-                        if existing is None:
-                            existing = message
-                        else:
-                            try:
-                                await message.delete()
-                            except discord.HTTPException:
-                                logger.warning("No se pudo eliminar un mensaje duplicado antiguo de la cola.")
-            except (discord.Forbidden, discord.HTTPException):
-                logger.exception("No se pudo revisar el historial del canal de pedidos.")
-                return
+        # Se revisa el historial incluso cuando PostgreSQL ya conoce el ID:
+        # así se eliminan duplicados y eventos individuales antiguos en cada arranque.
+        try:
+            async for message in channel.history(limit=None):
+                if message.author.id != bot.user.id:
+                    continue
+                titles = [e.title or "" for e in message.embeds]
+                is_queue = ORDER_QUEUE_TITLE in titles
+                is_old_order_event = any(
+                    "pedido por encargo registrado" in title.casefold()
+                    or "pedido por encargo entregado" in title.casefold()
+                    for title in titles
+                )
+                if is_queue:
+                    if existing is None:
+                        existing = message
+                    elif message.id != existing.id:
+                        try:
+                            await message.delete()
+                            logger.info("Mensaje duplicado de la cola eliminado (%s).", message.id)
+                        except discord.HTTPException:
+                            logger.warning("No se pudo eliminar un mensaje duplicado antiguo de la cola.")
+                elif is_old_order_event and ORDER_LOG_CHANNEL_ID == ORDER_QUEUE_CHANNEL_ID:
+                    try:
+                        await message.delete()
+                        logger.info("Publicación individual antigua eliminada (%s).", message.id)
+                    except discord.HTTPException:
+                        logger.warning("No se pudo eliminar una publicación individual antigua (%s).", message.id)
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception("No se pudo revisar el historial del canal de pedidos.")
+            return
 
         try:
             if existing is not None:
