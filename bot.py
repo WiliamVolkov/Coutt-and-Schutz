@@ -1083,44 +1083,120 @@ def get_ticket_owner_id(channel):
     return None
 
 
-async def refresh_orders_queue(guild=None):
-    """Crea o actualiza un único mensaje con la cola vigente de pedidos."""
-    if not ORDER_QUEUE_CHANNEL_ID:
-        logger.warning("ORDER_QUEUE_CHANNEL_ID no configurado; no se puede actualizar el mensaje único de pedidos.")
-        return
+orders_queue_lock = asyncio.Lock()
 
-    channel = guild.get_channel(ORDER_QUEUE_CHANNEL_ID) if guild else bot.get_channel(ORDER_QUEUE_CHANNEL_ID)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(ORDER_QUEUE_CHANNEL_ID)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            logger.exception("No se pudo acceder al canal de la cola de pedidos %s.", ORDER_QUEUE_CHANNEL_ID)
-            return
-    if not isinstance(channel, discord.TextChannel):
-        logger.error("ORDER_QUEUE_CHANNEL_ID debe apuntar a un canal de texto.")
-        return
 
-    embed = build_orders_embed()
-    existing = None
+def get_saved_orders_queue_message_id():
+    """Recupera de PostgreSQL el ID del mensaje único de la cola, si existe."""
+    if not DATABASE_URL:
+        return None
     try:
-        async for message in channel.history(limit=100):
-            if message.author.id != bot.user.id:
-                continue
-            if any(e.title == ORDER_QUEUE_TITLE for e in message.embeds):
-                if existing is None:
-                    existing = message
-                else:
-                    # Si quedaron mensajes duplicados antiguos, conservar solo uno.
-                    try:
-                        await message.delete()
-                    except discord.HTTPException:
-                        logger.warning("No se pudo eliminar un mensaje duplicado de la cola.")
-        if existing:
-            await existing.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        else:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-    except (discord.Forbidden, discord.HTTPException):
-        logger.exception("No se pudo crear o actualizar la lista única de pedidos.")
+        with _postgres_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS coutt_schutz_order_queue_message ("
+                    "id INTEGER PRIMARY KEY CHECK (id = 1), message_id BIGINT NOT NULL)"
+                )
+                cur.execute(
+                    "SELECT message_id FROM coutt_schutz_order_queue_message WHERE id = 1"
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+    except Exception:
+        logger.exception("No se pudo recuperar el ID del mensaje único de pedidos desde PostgreSQL.")
+        return None
+
+
+def save_orders_queue_message_id(message_id):
+    """Guarda el ID del mensaje único para reconocerlo después de reiniciar."""
+    if not DATABASE_URL:
+        return
+    try:
+        with _postgres_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS coutt_schutz_order_queue_message ("
+                    "id INTEGER PRIMARY KEY CHECK (id = 1), message_id BIGINT NOT NULL)"
+                )
+                cur.execute(
+                    "INSERT INTO coutt_schutz_order_queue_message (id, message_id) VALUES (1, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET message_id = EXCLUDED.message_id",
+                    (int(message_id),)
+                )
+    except Exception:
+        logger.exception("No se pudo guardar el ID del mensaje único de pedidos en PostgreSQL.")
+
+
+async def refresh_orders_queue(guild=None):
+    """Mantiene un único mensaje permanente: lo edita si existe y lo recrea si fue borrado."""
+    if not ORDER_QUEUE_CHANNEL_ID:
+        logger.warning(
+            "ORDER_QUEUE_CHANNEL_ID no configurado; define en Render el ID del canal donde debe estar la cola."
+        )
+        return
+
+    async with orders_queue_lock:
+        channel = guild.get_channel(ORDER_QUEUE_CHANNEL_ID) if guild else bot.get_channel(ORDER_QUEUE_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(ORDER_QUEUE_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.exception("No se pudo acceder al canal de la cola de pedidos %s.", ORDER_QUEUE_CHANNEL_ID)
+                return
+        if not isinstance(channel, discord.TextChannel):
+            logger.error("ORDER_QUEUE_CHANNEL_ID debe apuntar a un canal de texto.")
+            return
+
+        embed = build_orders_embed()
+        existing = None
+        saved_id = await asyncio.to_thread(get_saved_orders_queue_message_id)
+
+        # Primero se consulta el ID guardado en PostgreSQL: así no se publica otro
+        # mensaje cada vez que Render reinicia el proceso.
+        if saved_id:
+            try:
+                candidate = await channel.fetch_message(saved_id)
+                if candidate.author.id == bot.user.id and any(
+                    e.title == ORDER_QUEUE_TITLE for e in candidate.embeds
+                ):
+                    existing = candidate
+            except discord.NotFound:
+                logger.info("El mensaje guardado de la cola ya no existe; se recreará.")
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception("No se pudo comprobar el mensaje guardado de la cola.")
+
+        # Compatibilidad con mensajes publicados antes de guardar el ID. Se busca
+        # en el historial para reutilizar el mensaje y evitar duplicados.
+        if existing is None:
+            try:
+                async for message in channel.history(limit=None):
+                    if message.author.id != bot.user.id:
+                        continue
+                    if any(e.title == ORDER_QUEUE_TITLE for e in message.embeds):
+                        if existing is None:
+                            existing = message
+                        else:
+                            try:
+                                await message.delete()
+                            except discord.HTTPException:
+                                logger.warning("No se pudo eliminar un mensaje duplicado antiguo de la cola.")
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception("No se pudo revisar el historial del canal de pedidos.")
+                return
+
+        try:
+            if existing is not None:
+                # Edita el mensaje actual, sin volver a enviarlo al canal.
+                await existing.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                message = existing
+                logger.info("Lista única de pedidos actualizada en el mensaje existente (%s).", message.id)
+            else:
+                # Solo crea un mensaje cuando no existe ninguno válido.
+                message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                logger.info("Lista de pedidos creada en el canal %s (mensaje %s).", channel.id, message.id)
+            await asyncio.to_thread(save_orders_queue_message_id, message.id)
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception("No se pudo crear o actualizar la lista única de pedidos.")
 
 
 def build_orders_embed():
@@ -2567,6 +2643,18 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # ============================================================
 # INICIO
 # ============================================================
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    """Si borran la lista de pedidos, la vuelve a crear en el canal configurado."""
+    if (
+        message.channel.id == ORDER_QUEUE_CHANNEL_ID
+        and message.author.id == getattr(bot.user, "id", None)
+        and any(embed.title == ORDER_QUEUE_TITLE for embed in message.embeds)
+    ):
+        logger.warning("Se eliminó el mensaje único de pedidos; se restaurará automáticamente.")
+        await refresh_orders_queue()
+
 
 @bot.event
 async def on_ready():
