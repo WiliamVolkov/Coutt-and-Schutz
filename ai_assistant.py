@@ -19,6 +19,7 @@ Usa la API de Gemini (Google AI Studio, con capa gratuita) mediante aiohttp.
 
 import os
 import re
+import asyncio
 import time
 import hashlib
 import logging
@@ -46,6 +47,17 @@ GEMINI_URL = (
     "{model}:generateContent"
 )
 
+# Modelo de respaldo: se usa si el principal falla o está saturado (error 503).
+# Vacío = sin respaldo. Variable de entorno GEMINI_FALLBACK_MODEL.
+GEMINI_FALLBACK_MODEL = os.getenv(
+    "GEMINI_FALLBACK_MODEL", "gemini-flash-lite-latest"
+)
+GEMINI_ATTEMPTS_PER_MODEL = 2      # intentos por modelo
+GEMINI_RETRY_DELAY_SECONDS = 1.5   # pausa entre intentos
+GEMINI_TOTAL_BUDGET_SECONDS = 40   # no se inician intentos pasado este tiempo
+# Errores temporales de Gemini: vale la pena reintentar.
+RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
 # Canales donde se puede usar la IA. Vacío = en todos los canales.
 AI_ALLOWED_CHANNEL_IDS = set()
 
@@ -54,7 +66,7 @@ CATALOG_CACHE_SECONDS = 60     # tiempo que se reutiliza el catálogo leído
 ANSWER_CACHE_SECONDS = 600     # tiempo que se reutilizan respuestas iguales
 USER_COOLDOWN_SECONDS = 8      # espera entre preguntas de un mismo usuario
 MAX_QUESTION_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 45
+REQUEST_TIMEOUT_SECONDS = 25   # por intento
 
 # Canal interno que solo leen las respuestas para administradores.
 STAFF_CACHE_SECONDS = 60       # tiempo que se reutiliza el canal leído
@@ -654,43 +666,99 @@ class AIAssistant(commands.Cog):
             "Content-Type": "application/json",
         }
 
-        try:
-            async with self.session.post(
-                GEMINI_URL.format(model=GEMINI_MODEL),
-                json=payload,
-                headers=headers
-            ) as response:
-                if response.status == 429:
-                    raise AIError(
-                        "Hay demasiadas consultas en este momento. "
-                        "Inténtalo de nuevo en un minuto."
+        models = [GEMINI_MODEL]
+        if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+            models.append(GEMINI_FALLBACK_MODEL)
+
+        started = time.monotonic()
+        data = None
+        last_status = None
+        rate_limited = False
+
+        for model in models:
+            for attempt in range(1, GEMINI_ATTEMPTS_PER_MODEL + 1):
+                if time.monotonic() - started > GEMINI_TOTAL_BUDGET_SECONDS:
+                    break
+
+                status = None
+
+                try:
+                    async with self.session.post(
+                        GEMINI_URL.format(model=model),
+                        json=payload,
+                        headers=headers
+                    ) as response:
+                        status = response.status
+
+                        if status == 200:
+                            data = await response.json()
+                        else:
+                            body = (await response.text())[:500]
+                            logger.error(
+                                "Gemini (%s) respondió %s en el intento %s: %s",
+                                model, status, attempt, body
+                            )
+
+                            if status == 404:
+                                logger.error(
+                                    "El modelo '%s' no existe. Cambia "
+                                    "GEMINI_MODEL / GEMINI_FALLBACK_MODEL.",
+                                    model
+                                )
+                            elif status in (401, 403):
+                                logger.error(
+                                    "Gemini rechazó la clave de API (%s). "
+                                    "Revisa GEMINI_API_KEY.", status
+                                )
+
+                except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
+                    logger.warning(
+                        "Error de red o tiempo agotado con Gemini (%s), "
+                        "intento %s.", model, attempt
                     )
 
-                if response.status != 200:
-                    body = (await response.text())[:500]
-                    logger.error(
-                        "Gemini respondió %s: %s", response.status, body
-                    )
-
-                    if response.status == 404:
-                        logger.error(
-                            "El modelo '%s' no existe. Cambia GEMINI_MODEL.",
-                            GEMINI_MODEL
+                if data is not None:
+                    if model != models[0]:
+                        logger.info(
+                            "Respuesta obtenida con el modelo de respaldo %s.",
+                            model
                         )
+                    break
 
-                    raise AIError(
-                        "No pude consultar a la IA en este momento. "
-                        "Inténtalo más tarde."
-                    )
+                last_status = status
+                rate_limited = rate_limited or status == 429
 
-                data = await response.json()
+                # Error permanente con este modelo (404, 400, 403...):
+                # no reintentar, pasar al siguiente modelo.
+                if status is not None and status not in RETRYABLE_STATUSES:
+                    break
 
-        except AIError:
-            raise
-        except (aiohttp.ClientError, TimeoutError):
-            logger.exception("Error de red al consultar Gemini.")
+                if attempt < GEMINI_ATTEMPTS_PER_MODEL:
+                    await asyncio.sleep(GEMINI_RETRY_DELAY_SECONDS)
+
+            if data is not None:
+                break
+
+        if data is None:
+            logger.error(
+                "Gemini no respondió tras reintentos y respaldo "
+                "(último estado: %s).", last_status
+            )
+
+            if rate_limited:
+                raise AIError(
+                    "Hay demasiadas consultas en este momento. "
+                    "Inténtalo de nuevo en un minuto."
+                )
+
+            if last_status is None:
+                raise AIError(
+                    "La IA tardó demasiado en responder. Inténtalo de nuevo."
+                )
+
             raise AIError(
-                "La IA tardó demasiado en responder. Inténtalo de nuevo."
+                "No pude consultar a la IA en este momento. "
+                "Inténtalo más tarde."
             )
 
         candidates = data.get("candidates") or []
