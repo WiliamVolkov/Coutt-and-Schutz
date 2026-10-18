@@ -82,6 +82,8 @@ TICKET_TOPIC_PREFIX = "ticket:"  # el tema del canal guarda el ID del dueño
 PEDIDOS_DATA_FILE = os.getenv("PEDIDOS_DATA_FILE", "pedidos_encargo.json")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ORDER_LOG_CHANNEL_ID = int(os.getenv("ORDER_LOG_CHANNEL_ID", "0") or "0")
+# Canal que contiene el único mensaje visible con la cola actual de pedidos.
+ORDER_QUEUE_CHANNEL_ID = int(os.getenv("ORDER_QUEUE_CHANNEL_ID", "0") or "0")
 ORDER_REGISTER_BUTTON_ID = "coutt_schutz:order_register"
 ORDER_QUEUE_TITLE = "PEDIDOS POR ENCARGO | COUTT & SCHUTZ"
 
@@ -1052,6 +1054,46 @@ def get_ticket_owner_id(channel):
     return None
 
 
+async def refresh_orders_queue(guild=None):
+    """Crea o actualiza un único mensaje con la cola vigente de pedidos."""
+    if not ORDER_QUEUE_CHANNEL_ID:
+        logger.warning("ORDER_QUEUE_CHANNEL_ID no configurado; no se puede actualizar el mensaje único de pedidos.")
+        return
+
+    channel = guild.get_channel(ORDER_QUEUE_CHANNEL_ID) if guild else bot.get_channel(ORDER_QUEUE_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(ORDER_QUEUE_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            logger.exception("No se pudo acceder al canal de la cola de pedidos %s.", ORDER_QUEUE_CHANNEL_ID)
+            return
+    if not isinstance(channel, discord.TextChannel):
+        logger.error("ORDER_QUEUE_CHANNEL_ID debe apuntar a un canal de texto.")
+        return
+
+    embed = build_orders_embed()
+    existing = None
+    try:
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            if any(e.title == ORDER_QUEUE_TITLE for e in message.embeds):
+                if existing is None:
+                    existing = message
+                else:
+                    # Si quedaron mensajes duplicados antiguos, conservar solo uno.
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        logger.warning("No se pudo eliminar un mensaje duplicado de la cola.")
+        if existing:
+            await existing.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except (discord.Forbidden, discord.HTTPException):
+        logger.exception("No se pudo crear o actualizar la lista única de pedidos.")
+
+
 def build_orders_embed():
     embed = discord.Embed(
         title=ORDER_QUEUE_TITLE,
@@ -1097,236 +1139,96 @@ async def notify_customer(guild, customer_id, message):
     return False
 
 
-@bot.tree.command(name="pedido", description="Registra vehículos por encargo o marca un pedido como entregado.")
-@app_commands.describe(
-    accion="Elige si quieres registrar vehículos o marcar un pedido como entregado.",
-    vehiculos="Para registrar: modelos separados por comas, punto y coma o saltos de línea.",
-    numero="Para entregar: número de pedido que aparece en /pedido_cola."
-)
-@app_commands.choices(accion=[
-    app_commands.Choice(name="Registrar vehículos", value="registrar"),
-    app_commands.Choice(name="Marcar como entregado", value="entregar"),
-])
-async def pedido(
-    interaction: discord.Interaction,
-    accion: app_commands.Choice[str],
-    vehiculos: str | None = None,
-    numero: app_commands.Range[int, 1, 1000000] | None = None
-):
-    """Comando único para registrar vehículos y marcar pedidos como entregados."""
-    guild = interaction.guild
-    channel = interaction.channel
+class RegisterOrderModal(discord.ui.Modal, title="Registrar pedido por encargo"):
+    model = discord.ui.TextInput(
+        label="Modelo del vehículo solicitado",
+        placeholder="Ej.: Pfister Comet S2",
+        max_length=100,
+        required=True
+    )
 
-    if not is_ticket_staff(interaction.user):
-        await interaction.response.send_message(
-            "Solo el equipo de Coutt & Schutz puede gestionar pedidos.",
-            ephemeral=True
-        )
-        return
-
-    # Acción: marcar un pedido como entregado.
-    if accion.value == "entregar":
-        if numero is None:
-            await interaction.response.send_message(
-                "Para marcar un pedido como entregado, indica su número. "
-                "Ejemplo: `/pedido accion:Marcar como entregado numero:12`.",
-                ephemeral=True
-            )
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        guild = interaction.guild
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Este formulario solo funciona dentro de un ticket del servidor.", ephemeral=True)
+            return
+        if not is_ticket_staff(interaction.user):
+            await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede registrar pedidos.", ephemeral=True)
+            return
+        customer_id = get_ticket_owner_id(channel)
+        if customer_id is None:
+            await interaction.response.send_message("No pude identificar al cliente dueño de este ticket.", ephemeral=True)
             return
 
+        model_name = str(self.model.value).strip()
         async with orders_lock:
-            order = next(
-                (o for o in orders_data["orders"] if int(o.get("id", 0)) == numero),
-                None
-            )
-            if order is None:
-                await interaction.response.send_message(
-                    f"No existe el pedido **#{numero}**.",
-                    ephemeral=True
-                )
+            # Cuando la cola está vacía, comienza una nueva numeración desde #1.
+            if not any(o.get("status") == "pendiente" for o in orders_data["orders"]):
+                orders_data["orders"] = []
+                orders_data["next_id"] = 1
+            # Evita registrar dos veces el mismo modelo desde el mismo ticket.
+            duplicate = next((o for o in orders_data["orders"] if o.get("status") == "pendiente" and o.get("ticket_id") == channel.id and o.get("model", "").casefold() == model_name.casefold()), None)
+            if duplicate:
+                await interaction.response.send_message(f"Ese vehículo ya está en la cola para este ticket: pedido **#{duplicate['id']}**.", ephemeral=True)
                 return
-            if order.get("status") == "entregado":
-                await interaction.response.send_message(
-                    f"El pedido **#{numero}** ya estaba marcado como entregado.",
-                    ephemeral=True
-                )
-                return
-
-            order["status"] = "entregado"
-            order["delivered_at"] = datetime.now(timezone.utc).isoformat()
-            order["delivered_by"] = interaction.user.id
-            try:
-                save_orders()
-            except Exception:
-                logger.exception("No se pudo guardar el estado de entrega del pedido #%s.", numero)
-                order["status"] = "pendiente"
-                order["delivered_at"] = None
-                order["delivered_by"] = None
-                await interaction.response.send_message(
-                    "No pude guardar el cambio. Revisa el almacenamiento e inténtalo otra vez.",
-                    ephemeral=True
-                )
-                return
-
-        notified = False
-        if guild is not None:
-            notified = await notify_customer(
-                guild, int(order["customer_id"]),
-                f"✅ **Coutt & Schutz | Pedido entregado**\n\n"
-                f"Tu pedido **#{numero}** del vehículo **{order['model']}** ha sido marcado como entregado. "
-                "¡Gracias por confiar en Coutt & Schutz!\n\n"
-                f"Ticket relacionado: {order.get('ticket_url', 'No disponible')}"
-            )
-        status_message = (
-            "Se envió la notificación por mensaje privado."
-            if notified else
-            "No se pudo enviar mensaje privado; el cliente puede tener los DM cerrados."
-        )
-        await log_order_event(
-            guild, "✅ Pedido por encargo entregado",
-            f"Marcado como entregado por <@{interaction.user.id}>.", order
-        )
-        await interaction.response.send_message(
-            f"✅ Pedido **#{numero} — {order['model']}** marcado como entregado. {status_message}",
-            ephemeral=True
-        )
-        return
-
-    # Acción: registrar uno o varios vehículos.
-    if vehiculos is None or not vehiculos.strip():
-        await interaction.response.send_message(
-            "Para registrar vehículos, indica el campo `vehiculos`. "
-            "Puedes separar los modelos con comas, punto y coma o saltos de línea.",
-            ephemeral=True
-        )
-        return
-
-    if guild is None or not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message(
-            "Para registrar vehículos, ejecuta `/pedido` dentro de un ticket del servidor.",
-            ephemeral=True
-        )
-        return
-    if get_ticket_owner_id(channel) is None:
-        await interaction.response.send_message(
-            "Usa la acción **Registrar vehículos** dentro de un ticket válido de un cliente.",
-            ephemeral=True
-        )
-        return
-
-    customer_id = get_ticket_owner_id(channel)
-    models = [
-        item.strip()
-        for item in re.split(r"[,;\n]+", vehiculos)
-        if item.strip()
-    ]
-
-    # Quitar duplicados de la misma entrada sin cambiar el orden.
-    unique_models = []
-    seen = set()
-    for model in models:
-        key = model.casefold()
-        if key not in seen:
-            unique_models.append(model)
-            seen.add(key)
-
-    if not unique_models:
-        await interaction.response.send_message(
-            "Indica al menos un vehículo. Puedes separarlos con comas, punto y coma o saltos de línea.",
-            ephemeral=True
-        )
-        return
-    if len(unique_models) > 25:
-        await interaction.response.send_message(
-            "Puedes registrar como máximo 25 vehículos por comando.",
-            ephemeral=True
-        )
-        return
-
-    async with orders_lock:
-        existing = {
-            str(o.get("model", "")).casefold()
-            for o in orders_data["orders"]
-            if o.get("status") == "pendiente" and o.get("ticket_id") == channel.id
-        }
-        duplicates = [model for model in unique_models if model.casefold() in existing]
-        new_models = [model for model in unique_models if model.casefold() not in existing]
-
-        if not new_models:
-            await interaction.response.send_message(
-                "Todos esos vehículos ya están en la cola para este ticket: "
-                + ", ".join(f"**{model}**" for model in duplicates) + ".",
-                ephemeral=True
-            )
-            return
-
-        first_id = int(orders_data["next_id"])
-        created_at = datetime.now(timezone.utc).isoformat()
-        new_orders = []
-        for offset, model_name in enumerate(new_models):
-            order_id = first_id + offset
-            new_orders.append({
+            order_id = int(orders_data["next_id"])
+            order = {
                 "id": order_id,
                 "customer_id": customer_id,
                 "model": model_name,
                 "ticket_id": channel.id,
                 "ticket_url": channel.jump_url,
                 "guild_id": guild.id,
-                "created_at": created_at,
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "created_by": interaction.user.id,
                 "status": "pendiente",
                 "delivered_at": None,
                 "delivered_by": None
-            })
+            }
+            orders_data["orders"].append(order)
+            orders_data["next_id"] = order_id + 1
+            try:
+                save_orders()
+            except Exception:
+                logger.exception("No se pudo persistir el nuevo pedido.")
+                orders_data["orders"].remove(order)
+                orders_data["next_id"] = order_id
+                await interaction.response.send_message("No pude guardar el pedido. Revisa el almacenamiento del bot e inténtalo otra vez.", ephemeral=True)
+                return
 
-        orders_data["orders"].extend(new_orders)
-        orders_data["next_id"] = first_id + len(new_orders)
-        try:
-            save_orders()
-        except Exception:
-            logger.exception("No se pudieron guardar los pedidos por encargo.")
-            del orders_data["orders"][-len(new_orders):]
-            orders_data["next_id"] = first_id
-            await interaction.response.send_message(
-                "No pude guardar los pedidos. Revisa el almacenamiento del bot e inténtalo otra vez.",
-                ephemeral=True
-            )
-            return
-
-    lines = [f"• **#{order['id']}** — {order['model']}" for order in new_orders]
-    duplicate_note = (
-        "\n\n⚠️ Ya estaban registrados y se omitieron: "
-        + ", ".join(f"**{model}**" for model in duplicates) + "."
-        if duplicates else ""
-    )
-    await interaction.response.send_message(
-        f"✅ Se registraron **{len(new_orders)} vehículo(s)** en la cola general para <@{customer_id}>:\n"
-        + "\n".join(lines)
-        + duplicate_note
-        + f"\n\nTicket guardado: {channel.jump_url}",
-        ephemeral=True,
-        allowed_mentions=discord.AllowedMentions.none()
-    )
-
-    await notify_customer(
-        guild, customer_id,
-        "🧾 **Coutt & Schutz | Pedidos por encargo registrados**\n\n"
-        + "Registramos los siguientes vehículos en tu solicitud:\n"
-        + "\n".join(f"• **#{order['id']}** — {order['model']}" for order in new_orders)
-        + "\nLos pedidos se gestionan por orden de llegada. El equipo te avisará cuando estén entregados.\n\n"
-        + f"Ticket de seguimiento: {channel.jump_url}"
-    )
-    await channel.send(
-        f"🧾 Se registraron {len(new_orders)} pedido(s) por {interaction.user.mention}:\n"
-        + "\n".join(f"• **#{order['id']}** — {order['model']}" for order in new_orders)
-        + f"\nEnlace guardado en la cola: {channel.jump_url}",
-        allowed_mentions=discord.AllowedMentions.none()
-    )
-    for order in new_orders:
+        await interaction.response.send_message(f"Pedido **#{order_id}** registrado en la cola general. Cliente: <@{customer_id}> · Vehículo: **{model_name}**. El enlace de este ticket quedó guardado.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await notify_customer(
+            guild, customer_id,
+            f"🧾 **Coutt & Schutz | Pedido por encargo registrado**\n\n"
+            f"Tu solicitud de **{model_name}** quedó registrada con el número **#{order_id}**. "
+            "Los pedidos se gestionan por orden de llegada. El equipo te avisará cuando esté entregado.\n\n"
+            f"Ticket de seguimiento: {channel.jump_url}"
+        )
+        await channel.send(
+            f"🧾 Pedido **#{order_id}** registrado por {interaction.user.mention}: **{model_name}**. "
+            f"Enlace guardado en la cola: {channel.jump_url}",
+            allowed_mentions=discord.AllowedMentions.none()
+        )
         await log_order_event(
             guild, "📦 Pedido por encargo registrado",
             f"Registrado por <@{interaction.user.id}>.", order
         )
+        await refresh_orders_queue(guild)
+
+
+class RegisterOrderButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Registrar pedido por encargo", emoji="📦", style=discord.ButtonStyle.success, custom_id=ORDER_REGISTER_BUTTON_ID)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not isinstance(interaction.channel, discord.TextChannel) or get_ticket_owner_id(interaction.channel) is None:
+            await interaction.response.send_message("Este botón solo se puede usar dentro de un ticket válido.", ephemeral=True)
+            return
+        if not is_ticket_staff(interaction.user):
+            await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede registrar pedidos por encargo.", ephemeral=True)
+            return
+        await interaction.response.send_modal(RegisterOrderModal())
 
 
 @bot.tree.command(name="pedido_cola", description="Muestra los pedidos por encargo pendientes, en orden de llegada.")
@@ -1335,6 +1237,64 @@ async def pedido_cola(interaction: discord.Interaction):
         await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede consultar la cola.", ephemeral=True)
         return
     await interaction.response.send_message(embed=build_orders_embed(), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="pedido_entregar", description="Marca un pedido por encargo como entregado y avisa al cliente.")
+@app_commands.describe(numero="Número de pedido registrado en la cola")
+async def pedido_entregar(interaction: discord.Interaction, numero: app_commands.Range[int, 1, 1000000]):
+    if not is_ticket_staff(interaction.user):
+        await interaction.response.send_message("Solo el equipo de Coutt & Schutz puede marcar pedidos como entregados.", ephemeral=True)
+        return
+    async with orders_lock:
+        order = next((o for o in orders_data["orders"] if int(o.get("id", 0)) == numero), None)
+        if order is None:
+            await interaction.response.send_message(f"No existe el pedido **#{numero}**.", ephemeral=True)
+            return
+        if order.get("status") == "entregado":
+            await interaction.response.send_message(f"El pedido **#{numero}** ya estaba marcado como entregado.", ephemeral=True)
+            return
+        order["status"] = "entregado"
+        order["delivered_at"] = datetime.now(timezone.utc).isoformat()
+        order["delivered_by"] = interaction.user.id
+        # Si se acaba la cola, archiva el ciclo activo en el registro de auditoría
+        # y reinicia los números. El objeto local `order` conserva los datos para avisar.
+        queue_finished = not any(
+            o is not order and o.get("status") == "pendiente"
+            for o in orders_data["orders"]
+        )
+        old_orders = list(orders_data["orders"])
+        old_next_id = orders_data["next_id"]
+        if queue_finished:
+            orders_data["orders"] = []
+            orders_data["next_id"] = 1
+        try:
+            save_orders()
+        except Exception:
+            orders_data["orders"] = old_orders
+            orders_data["next_id"] = old_next_id
+            order["status"] = "pendiente"
+            order["delivered_at"] = None
+            order["delivered_by"] = None
+            await interaction.response.send_message("No pude guardar el cambio. Revisa el almacenamiento e inténtalo otra vez.", ephemeral=True)
+            return
+
+    guild = interaction.guild
+    notified = False
+    if guild is not None:
+        notified = await notify_customer(
+            guild, int(order["customer_id"]),
+            f"✅ **Coutt & Schutz | Pedido entregado**\n\n"
+            f"Tu pedido **#{numero}** del vehículo **{order['model']}** ha sido marcado como entregado. "
+            "¡Gracias por confiar en Coutt & Schutz!\n\n"
+            f"Ticket relacionado: {order.get('ticket_url', 'No disponible')}"
+        )
+    status = "Se envió la notificación por mensaje privado." if notified else "No se pudo enviar mensaje privado (el cliente puede tener los DM cerrados)."
+    await log_order_event(
+        guild, "✅ Pedido por encargo entregado",
+        f"Marcado como entregado por <@{interaction.user.id}>.", order
+    )
+    await refresh_orders_queue(guild)
+    await interaction.response.send_message(f"Pedido **#{numero}** marcado como entregado. {status}", ephemeral=True)
 
 
 load_orders()
@@ -1492,7 +1452,7 @@ class TicketControlView(discord.ui.LayoutView):
             ))
 
         container.add_item(discord.ui.Separator())
-        container.add_item(discord.ui.ActionRow(CloseTicketButton()))
+        container.add_item(discord.ui.ActionRow(RegisterOrderButton(), CloseTicketButton()))
 
         self.add_item(container)
 
@@ -2537,10 +2497,6 @@ async def on_member_remove(member):
 # INICIO
 # ============================================================
 
-# Evita repetir la sincronización de comandos de servidor en reconexiones.
-_synced_guild_commands: set[int] = set()
-
-
 @bot.event
 async def on_ready():
     logger.info(
@@ -2549,33 +2505,11 @@ async def on_ready():
         bot.user.id
     )
 
-    # Los comandos globales de Discord pueden tardar en aparecer.
-    # Copiarlos y sincronizarlos en el servidor conectado hace que /pedido
-    # y los demás comandos de aplicación estén disponibles inmediatamente.
-    for guild in bot.guilds:
-        if guild.id in _synced_guild_commands:
-            continue
-        try:
-            bot.tree.copy_global_to(guild=discord.Object(id=guild.id))
-            synced = await bot.tree.sync(guild=discord.Object(id=guild.id))
-            _synced_guild_commands.add(guild.id)
-            logger.info(
-                "Comandos de aplicación sincronizados en %s (%s): %s comandos",
-                guild.name,
-                guild.id,
-                len(synced)
-            )
-        except Exception:
-            logger.exception(
-                "No se pudieron sincronizar los comandos en %s (%s).",
-                guild.name,
-                guild.id
-            )
-
     await ensure_panel()
     await ensure_ticket_panel()
     await ensure_verification_panel()
     await ensure_invite_panel()
+    await refresh_orders_queue()
     await ensure_v1_guide_post()
     await update_workers_list()
     await update_stats_panel()
