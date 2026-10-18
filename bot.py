@@ -37,6 +37,10 @@ WORKERS_CHANNEL_ID = 1560902787837988954
 WORKERS_BASE_ROLE_ID = 1558775758904893501
 WORKERS_LIST_MARKER = "COUTT_SCHUTZ_WORKERS_LIST_V1"
 
+# Panel persistente de estadísticas del catálogo.
+STATS_CHANNEL_ID = 1561277200576286730
+STATS_PANEL_TITLE = "ESTADÍSTICAS | COUTT & SCHUTZ"
+
 # Lista de vehiculos del concesionario predefinido por el sistema del
 # servidor de rol. NO se venden aqui: la IA los usa solo como referencia.
 SYSTEM_DEALER_CHANNEL_ID = 1560933334253703188
@@ -1696,6 +1700,7 @@ async def on_message(message: discord.Message):
                         view=view,
                         file=file
                     )
+                    await update_stats_panel(message.guild)
 
                     # Eliminar la solicitud tras publicar correctamente.
                     pending_uploads.pop(message.author.id, None)
@@ -1873,6 +1878,141 @@ async def ensure_v1_guide_post():
 
 
 # ============================================================
+# PANEL PERSISTENTE DE ESTADÍSTICAS
+# ============================================================
+
+def _collect_component_texts(components, output):
+    """Recoge textos de publicaciones hechas con Components V2."""
+    for component in components or []:
+        content = getattr(component, "content", None)
+        if isinstance(content, str) and content.strip():
+            output.append(content.strip())
+        children = getattr(component, "children", None)
+        if children:
+            _collect_component_texts(children, output)
+
+def _parse_stats_price(text):
+    """Extrae un precio numérico del texto de una publicación."""
+    import re as _re
+    match = _re.search(r"(?:\*\*Precio:\*\*|Precio:)\s*([^\n]+)", text, _re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    # Quitar emojis/texto posterior si se encuentra en la misma línea.
+    digits = _re.sub(r"[^0-9]", "", value)
+    return int(digits) if digits else None
+
+def _stats_vehicle_data(message):
+    """Reconoce publicaciones de vehículos nuevas y antiguas del bot."""
+    parts = []
+    _collect_component_texts(message.components, parts)
+    for embed in message.embeds:
+        if embed.title:
+            parts.append(embed.title)
+        if embed.description:
+            parts.append(embed.description)
+        for field in embed.fields:
+            parts.append(f"{field.name}: {field.value}")
+    text = "\n".join(parts)
+    if "COUTT & SCHUTZ" not in text.upper() and not message.embeds:
+        return None
+    name = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("## "):
+            name = line[3:].strip().strip("*")
+            break
+    if not name and message.embeds:
+        name = next((e.title for e in message.embeds if e.title), None)
+    price = _parse_stats_price(text)
+    if not name or price is None:
+        return None
+    return {"name": name, "price": price}
+
+async def _get_catalog_stats(guild):
+    """Lee el historial de los dos canales y calcula cifras reales."""
+    data = {"used": [], "imported": []}
+    for channel_id, kind in ((USED_VEHICLES_CHANNEL_ID, "used"),
+                             (IMPORTED_VEHICLES_CHANNEL_ID, "imported")):
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                logger.exception("No se pudo acceder al canal de catálogo %s", channel_id)
+                continue
+        try:
+            async for message in channel.history(limit=None):
+                if message.author.id != bot.user.id:
+                    continue
+                vehicle = _stats_vehicle_data(message)
+                if vehicle:
+                    data[kind].append(vehicle)
+        except discord.Forbidden:
+            logger.error("Sin permiso para leer el historial del catálogo %s", channel_id)
+        except discord.HTTPException:
+            logger.exception("Error leyendo el catálogo %s", channel_id)
+    return data
+
+def build_stats_embed(data):
+    used = data["used"]
+    imported = data["imported"]
+    all_vehicles = used + imported
+    prices = [v["price"] for v in all_vehicles if v.get("price") is not None]
+    average = round(sum(prices) / len(prices)) if prices else None
+    highest = max(all_vehicles, key=lambda v: v["price"], default=None)
+
+    def money(value):
+        return f"${value:,}".replace(",", ".")
+
+    embed = discord.Embed(
+        title=STATS_PANEL_TITLE,
+        description="Resumen actualizado del catálogo de vehículos.",
+        colour=PANEL_COLOR,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="🚘 Vehículos publicados", value=f"**{len(all_vehicles)}**", inline=True)
+    embed.add_field(name="🔹 Usados", value=f"**{len(used)}**", inline=True)
+    embed.add_field(name="🌎 Importados", value=f"**{len(imported)}**", inline=True)
+    embed.add_field(name="💰 Precio promedio", value=f"**{money(average)}**" if average is not None else "Sin datos de precios", inline=True)
+    if highest:
+        embed.add_field(name="🏆 Vehículo de mayor precio", value=f"**{highest['name']}**\n{money(highest['price'])}", inline=True)
+    else:
+        embed.add_field(name="🏆 Vehículo de mayor precio", value="Sin vehículos publicados", inline=True)
+    embed.set_footer(text="Coutt & Schutz · Estadísticas automáticas del catálogo")
+    return embed
+
+async def update_stats_panel(guild=None):
+    """Publica el panel una vez y después edita el mensaje existente."""
+    guild = guild or (bot.guilds[0] if bot.guilds else None)
+    if guild is None:
+        return
+    channel = bot.get_channel(STATS_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(STATS_CHANNEL_ID)
+        except discord.HTTPException:
+            logger.exception("No se pudo acceder al canal de estadísticas.")
+            return
+    try:
+        data = await _get_catalog_stats(guild)
+        embed = build_stats_embed(data)
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            if any(e.title == STATS_PANEL_TITLE for e in message.embeds):
+                await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                logger.info("Panel de estadísticas actualizado en el mensaje existente.")
+                return
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        logger.info("Panel de estadísticas publicado en el canal %s.", STATS_CHANNEL_ID)
+    except discord.Forbidden:
+        logger.error("El bot necesita ver el canal de estadísticas, enviar mensajes y leer el historial.")
+    except discord.HTTPException:
+        logger.exception("Error actualizando el panel de estadísticas.")
+
+
+# ============================================================
 # LISTA PÚBLICA DE TRABAJADORES
 # ============================================================
 
@@ -1994,6 +2134,7 @@ async def on_ready():
     await ensure_invite_panel()
     await ensure_v1_guide_post()
     await update_workers_list()
+    await update_stats_panel()
 
 
 def main():
