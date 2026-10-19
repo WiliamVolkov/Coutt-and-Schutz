@@ -83,7 +83,8 @@ PEDIDOS_DATA_FILE = os.getenv("PEDIDOS_DATA_FILE", "pedidos_encargo.json")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ORDER_LOG_CHANNEL_ID = int(os.getenv("ORDER_LOG_CHANNEL_ID", "0") or "0")
 # Canal que contiene el único mensaje visible con la cola actual de pedidos.
-ORDER_QUEUE_CHANNEL_ID = int(os.getenv("ORDER_QUEUE_CHANNEL_ID", "0") or "0")
+# ID fijo del canal donde se muestra el panel de pedidos en tiempo real.
+ORDER_QUEUE_CHANNEL_ID = 1561281767414042624
 ORDER_REGISTER_BUTTON_ID = "coutt_schutz:order_register"
 ORDER_QUEUE_TITLE = "PEDIDOS POR ENCARGO | COUTT & SCHUTZ"
 
@@ -1149,12 +1150,6 @@ def save_orders_queue_message_id(message_id):
 
 async def refresh_orders_queue(guild=None):
     """Mantiene un único mensaje permanente: lo edita si existe y lo recrea si fue borrado."""
-    if not ORDER_QUEUE_CHANNEL_ID:
-        logger.warning(
-            "ORDER_QUEUE_CHANNEL_ID no configurado; define en Render el ID del canal donde debe estar la cola."
-        )
-        return
-
     async with orders_queue_lock:
         channel = guild.get_channel(ORDER_QUEUE_CHANNEL_ID) if guild else bot.get_channel(ORDER_QUEUE_CHANNEL_ID)
         if channel is None:
