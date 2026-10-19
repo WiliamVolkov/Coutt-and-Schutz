@@ -1309,16 +1309,22 @@ class RegisterOrderModal(discord.ui.Modal, title="Registrar pedido por encargo")
 
         model_name = str(self.model.value).strip()
         async with orders_lock:
-            # Cuando la cola está vacía, comienza una nueva numeración desde #1.
-            if not any(o.get("status") == "pendiente" for o in orders_data["orders"]):
-                orders_data["orders"] = []
-                orders_data["next_id"] = 1
+            # La numeración representa la posición actual en la cola, no el total
+            # histórico de pedidos. Se conservan únicamente los pedidos pendientes.
+            orders_data["orders"] = [
+                o for o in orders_data["orders"] if o.get("status") == "pendiente"
+            ]
+            orders_data["orders"].sort(key=lambda o: o.get("created_at", ""))
+            for position, existing_order in enumerate(orders_data["orders"], start=1):
+                existing_order["id"] = position
+            orders_data["next_id"] = len(orders_data["orders"]) + 1
+
             # Evita registrar dos veces el mismo modelo desde el mismo ticket.
-            duplicate = next((o for o in orders_data["orders"] if o.get("status") == "pendiente" and o.get("ticket_id") == channel.id and o.get("model", "").casefold() == model_name.casefold()), None)
+            duplicate = next((o for o in orders_data["orders"] if o.get("ticket_id") == channel.id and o.get("model", "").casefold() == model_name.casefold()), None)
             if duplicate:
                 await interaction.response.send_message(f"Ese vehículo ya está en la cola para este ticket: pedido **#{duplicate['id']}**.", ephemeral=True)
                 return
-            order_id = int(orders_data["next_id"])
+            order_id = len(orders_data["orders"]) + 1
             order = {
                 "id": order_id,
                 "customer_id": customer_id,
@@ -1422,17 +1428,15 @@ async def pedido_entregar(interaction: discord.Interaction, numero: app_commands
         order["status"] = "entregado"
         order["delivered_at"] = datetime.now(timezone.utc).isoformat()
         order["delivered_by"] = interaction.user.id
-        # Si se acaba la cola, archiva el ciclo activo en el registro de auditoría
-        # y reinicia los números. El objeto local `order` conserva los datos para avisar.
-        queue_finished = not any(
-            o is not order and o.get("status") == "pendiente"
-            for o in orders_data["orders"]
-        )
+        # Al entregar, el pedido sale de la cola activa. Los restantes se
+        # renumeran 1..N; el evento de entrega queda registrado en el canal de auditoría.
         old_orders = list(orders_data["orders"])
         old_next_id = orders_data["next_id"]
-        if queue_finished:
-            orders_data["orders"] = []
-            orders_data["next_id"] = 1
+        orders_data["orders"] = [o for o in orders_data["orders"] if o is not order]
+        orders_data["orders"].sort(key=lambda o: o.get("created_at", ""))
+        for position, remaining_order in enumerate(orders_data["orders"], start=1):
+            remaining_order["id"] = position
+        orders_data["next_id"] = len(orders_data["orders"]) + 1
         try:
             save_orders()
         except Exception:
@@ -1650,7 +1654,8 @@ def ticket_channel_name(member):
         text = re.sub(r"[^\w\-]", "", text)  # quitar emojis y símbolos
         return text.strip("-_")[:90]
 
-    return clean(member.display_name) or clean(member.name) or "ticket"
+    username = clean(member.display_name) or clean(member.name) or "usuario"
+    return f"ticket-{username}"[:100]
 
 
 class OpenTicketButton(discord.ui.Button):
