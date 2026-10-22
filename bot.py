@@ -171,7 +171,9 @@ class CouttSchutzBot(commands.Bot):
             ticket_channel_id=TICKET_PANEL_CHANNEL_ID,
             categories=[name for name, _ in VEHICLE_CATEGORIES],
             staff_channel_id=WORKERS_CHANNEL_ID,
-            system_channel_id=SYSTEM_DEALER_CHANNEL_ID
+            system_channel_id=SYSTEM_DEALER_CHANNEL_ID,
+            ticket_staff_role_id=TICKET_STAFF_ROLE_ID,
+            ticket_topic_prefix=TICKET_TOPIC_PREFIX
         )
         # IMPORTANTE: eliminar los comandos registrados en el ámbito del servidor
         # antes de sincronizar los globales. Discord puede mostrar simultáneamente
