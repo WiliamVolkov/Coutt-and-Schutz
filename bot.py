@@ -1747,6 +1747,16 @@ class OpenTicketButton(discord.ui.Button):
                 reason=f"Ticket abierto por {member}"
             )
 
+            # La IA saluda primero automáticamente al crear cada ticket nuevo.
+            await channel.send(
+                f"¡Hola {member.mention}! 👋 Soy el asistente virtual de Coutt & Schutz. "
+                "Estoy aquí para ayudarte con consultas sobre vehículos, precios y el proceso "
+                "de compra. Cuéntame qué necesitas y te responderé con la información disponible "
+                "en nuestro catálogo. Si hace falta atención personalizada, el equipo podrá "
+                "continuar la conversación.",
+                allowed_mentions=discord.AllowedMentions(users=[member])
+            )
+
             await channel.send(
                 view=TicketControlView(
                     member,
