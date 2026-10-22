@@ -147,9 +147,10 @@ precio, categorías, comparaciones entre vehículos y recomendaciones según \
 presupuesto o gustos.
 - Preguntas sobre cómo funciona la concesionaria (compra, atención, \
 contacto), usando SOLO la sección "SOBRE LA CONCESIONARIA".
-- Dudas generales sobre vehículos (por ejemplo, qué es un sedán o en qué \
-se diferencia un usado de un importado), de forma breve y sin afirmar nada \
-sobre nuestro catálogo que no esté en él.
+- Solo puedes responder con información presente en el catálogo y en las \
+fuentes autorizadas del servidor que se incluyan explícitamente en el contexto. \
+No completes huecos con conocimientos generales ni inventes especificaciones. \
+Si la fuente no contiene el dato, dilo claramente y deriva la consulta al equipo humano.
 - Saludos y cortesía breve.
 
 Reglas:
@@ -165,9 +166,8 @@ enlace con formato [Ver publicación](enlace). Usa una lista corta; si hay \
 muchos, muestra los más relevantes y ofrece afinar la búsqueda.
 - Si ningún vehículo cumple lo pedido, dilo claramente y, si tiene sentido, \
 sugiere la opción más cercana del catálogo.
-- Si la pregunta no tiene relación con la concesionaria ni con vehículos, \
-responde con amabilidad que solo puedes ayudar con consultas de la \
-concesionaria.
+- Si la pregunta no tiene relación con la concesionaria ni con los datos \
+autorizados proporcionados, indica amablemente que no puedes ayudar con ello.
 - No tienes acceso a información interna: personal, rangos, datos \
 administrativos o privados del servidor. Si te la piden, responde con \
 amabilidad que esa información está reservada a los administradores. Nunca \
@@ -421,8 +421,14 @@ class AIError(Exception):
 class AIAssistant(commands.Cog):
     def __init__(self, bot, used_channel_id, imported_channel_id,
                  ticket_channel_id=None, categories=None,
-                 staff_channel_id=None, system_channel_id=None):
+                 staff_channel_id=None, system_channel_id=None,
+                 ticket_staff_role_id=None, ticket_topic_prefix="ticket:"):
         self.bot = bot
+        self.ticket_staff_role_id = ticket_staff_role_id
+        self.ticket_topic_prefix = ticket_topic_prefix
+        # En modo colaborativo, el primer mensaje del personal silencia la IA
+        # para ese ticket durante la vida del proceso.
+        self.staff_taken_tickets = set()
         self.system_prompt = build_system_prompt(
             used_channel_id,
             imported_channel_id,
@@ -864,50 +870,92 @@ class AIAssistant(commands.Cog):
             return str(error)
 
     # --------------------------------------------------------
-    # Mención: @bot pregunta
+    # Atención automática de tickets + mención tradicional
     # --------------------------------------------------------
+
+    def _ticket_owner_id(self, channel):
+        topic = getattr(channel, "topic", None) or ""
+        if not topic.startswith(self.ticket_topic_prefix):
+            return None
+        try:
+            return int(topic[len(self.ticket_topic_prefix):])
+        except (TypeError, ValueError):
+            return None
+
+    def _is_ticket_staff(self, member):
+        if is_admin(member):
+            return True
+        return (
+            self.ticket_staff_role_id is not None
+            and isinstance(member, discord.Member)
+            and any(role.id == self.ticket_staff_role_id for role in member.roles)
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
             return
 
-        if self.bot.user not in message.mentions:
+        owner_id = self._ticket_owner_id(message.channel)
+        is_ticket = owner_id is not None
+
+        # Modo colaborativo: el personal toma la conversación al enviar
+        # su primer mensaje en el ticket. La IA no responde a ese mensaje.
+        if is_ticket and self._is_ticket_staff(message.author):
+            self.staff_taken_tickets.add(message.channel.id)
             return
 
-        if not self.channel_allowed(message.channel.id):
-            return
-
-        question = re.sub(
-            rf"<@!?{self.bot.user.id}>", "", message.content
-        )
+        if is_ticket:
+            # Solo atiende al usuario dueño del ticket.
+            if message.author.id != owner_id:
+                return
+            if message.channel.id in self.staff_taken_tickets:
+                return
+            question = (message.content or "").strip()
+            if not question and not message.attachments:
+                return
+            if message.attachments and not question:
+                question = (
+                    "El cliente envió un archivo adjunto sin texto. Pídele que "
+                    "explique su consulta por escrito; no afirmes haber leído el archivo."
+                )
+            # Nunca exponer información interna a través de un ticket público.
+            admin_mode = False
+        else:
+            # Se conserva el comportamiento original fuera de tickets:
+            # mención al bot y comando /ia.
+            if self.bot.user not in message.mentions:
+                return
+            if not self.channel_allowed(message.channel.id):
+                return
+            question = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
+            admin_mode = is_admin(message.author)
 
         no_mentions = discord.AllowedMentions.none()
-
         try:
             async with message.channel.typing():
                 text = await self.answer_question(
-                    message.author.id,
-                    question,
-                    admin=is_admin(message.author)
+                    message.author.id, question, admin=admin_mode
                 )
-
             chunks = split_message(text)
-            await message.reply(
-                chunks[0],
-                mention_author=False,
-                allowed_mentions=no_mentions
-            )
-            for chunk in chunks[1:]:
+            if is_ticket:
                 await message.channel.send(
-                    chunk,
+                    chunks[0], allowed_mentions=no_mentions
+                )
+            else:
+                await message.reply(
+                    chunks[0], mention_author=False,
                     allowed_mentions=no_mentions
                 )
-
+            for chunk in chunks[1:]:
+                await message.channel.send(
+                    chunk, allowed_mentions=no_mentions
+                )
         except discord.HTTPException:
             logger.exception("No se pudo enviar la respuesta de la IA.")
 
     # --------------------------------------------------------
+
     # Comando de barra: /ia pregunta
     # --------------------------------------------------------
 
@@ -957,7 +1005,8 @@ class AIAssistant(commands.Cog):
 
 async def setup_ai(bot, used_channel_id, imported_channel_id,
                    ticket_channel_id=None, categories=None,
-                   staff_channel_id=None, system_channel_id=None):
+                   staff_channel_id=None, system_channel_id=None,
+                   ticket_staff_role_id=None, ticket_topic_prefix="ticket:"):
     await bot.add_cog(
         AIAssistant(
             bot,
@@ -966,7 +1015,9 @@ async def setup_ai(bot, used_channel_id, imported_channel_id,
             ticket_channel_id,
             categories,
             staff_channel_id,
-            system_channel_id
+            system_channel_id,
+            ticket_staff_role_id,
+            ticket_topic_prefix
         )
     )
 
