@@ -53,8 +53,8 @@ GEMINI_FALLBACK_MODEL = os.getenv(
     "GEMINI_FALLBACK_MODEL", "gemini-flash-lite-latest"
 )
 GEMINI_ATTEMPTS_PER_MODEL = 2      # intentos por modelo
-GEMINI_RETRY_DELAY_SECONDS = 1.5   # pausa entre intentos
-GEMINI_TOTAL_BUDGET_SECONDS = 40   # no se inician intentos pasado este tiempo
+GEMINI_RETRY_DELAY_SECONDS = 2.0   # pausa entre intentos
+GEMINI_TOTAL_BUDGET_SECONDS = 100  # margen para reintentos y modelo de respaldo
 # Errores temporales de Gemini: vale la pena reintentar.
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
@@ -66,7 +66,7 @@ CATALOG_CACHE_SECONDS = 60     # tiempo que se reutiliza el catálogo leído
 ANSWER_CACHE_SECONDS = 600     # tiempo que se reutilizan respuestas iguales
 USER_COOLDOWN_SECONDS = 8      # espera entre preguntas de un mismo usuario
 MAX_QUESTION_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 25   # por intento
+REQUEST_TIMEOUT_SECONDS = 45   # por intento; Gemini puede tardar con catálogos extensos
 
 # Canal interno que solo leen las respuestas para administradores.
 STAFF_CACHE_SECONDS = 60       # tiempo que se reutiliza el canal leído
@@ -630,7 +630,12 @@ class AIAssistant(commands.Cog):
                          staff_text=None, admin=False, system_text=None):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+                timeout=aiohttp.ClientTimeout(
+                    total=REQUEST_TIMEOUT_SECONDS,
+                    connect=10,
+                    sock_connect=10,
+                    sock_read=40
+                )
             )
 
         system_prompt = self.admin_system_prompt if admin else self.system_prompt
@@ -719,8 +724,9 @@ class AIAssistant(commands.Cog):
 
                 except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
                     logger.warning(
-                        "Error de red o tiempo agotado con Gemini (%s), "
-                        "intento %s.", model, attempt
+                        "Error de red o timeout con Gemini (%s), intento %s. "
+                        "Se intentará de nuevo si queda tiempo.", model, attempt,
+                        exc_info=True
                     )
 
                 if data is not None:
