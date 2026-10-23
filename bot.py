@@ -75,7 +75,6 @@ TICKET_ARCHIVE_FORUM_ID = 1561573909772501042
 # ticket, puede ver el canal y puede cerrarlo.
 TICKET_STAFF_ROLE_ID = 1558775758904893501
 TICKET_OPEN_ID = "coutt_schutz:ticket_open"
-TICKET_SELL_VEHICLE_ID = "coutt_schutz:ticket_sell_vehicle"
 TICKET_CLOSE_ID = "coutt_schutz:ticket_close"
 TICKET_TOPIC_PREFIX = "ticket:"  # el tema del canal guarda el ID del dueño
 
@@ -1099,25 +1098,13 @@ def is_ticket_staff(member):
 
 
 def get_ticket_owner_id(channel):
-    """Obtiene el dueño tanto de tickets antiguos como de tickets tipados."""
     topic = getattr(channel, "topic", None) or ""
     if topic.startswith(TICKET_TOPIC_PREFIX):
         try:
-            # Formatos admitidos: ticket:123 (antiguo) y ticket:123:venta.
-            return int(topic[len(TICKET_TOPIC_PREFIX):].split(":", 1)[0])
-        except (TypeError, ValueError):
+            return int(topic[len(TICKET_TOPIC_PREFIX):])
+        except ValueError:
             return None
     return None
-
-
-def get_ticket_type(channel):
-    """Devuelve el tipo del ticket; los canales antiguos cuentan como contacto."""
-    topic = getattr(channel, "topic", None) or ""
-    if topic.startswith(TICKET_TOPIC_PREFIX):
-        parts = topic[len(TICKET_TOPIC_PREFIX):].split(":", 1)
-        if len(parts) == 2 and parts[1].strip().lower() in {"venta", "contacto"}:
-            return parts[1].strip().lower()
-    return "contacto"
 
 
 orders_queue_lock = asyncio.Lock()
@@ -1791,7 +1778,7 @@ class TicketControlView(discord.ui.LayoutView):
         self.add_item(container)
 
 
-def ticket_channel_name(member, ticket_type="contacto"):
+def ticket_channel_name(member):
     """
     Nombre del canal del ticket a partir del apodo del miembro
     (o su nombre visible si no tiene apodo). Discord no permite
@@ -1805,24 +1792,17 @@ def ticket_channel_name(member, ticket_type="contacto"):
         return text.strip("-_")[:90]
 
     username = clean(member.display_name) or clean(member.name) or "usuario"
-    prefix = "venta" if ticket_type == "venta" else "contacto"
-    return f"ticket-{prefix}-{username}"[:100]
+    return f"ticket-{username}"[:100]
 
 
 class OpenTicketButton(discord.ui.Button):
-    def __init__(self, ticket_type="contacto"):
-        self.ticket_type = ticket_type
-        if ticket_type == "venta":
-            label = "Vender vehículo a la concesionaria"
-            emoji = "🚘"
-            custom_id = TICKET_SELL_VEHICLE_ID
-            style = discord.ButtonStyle.success
-        else:
-            label = "Abrir ticket"
-            emoji = "📩"
-            custom_id = TICKET_OPEN_ID
-            style = discord.ButtonStyle.primary
-        super().__init__(label=label, emoji=emoji, style=style, custom_id=custom_id)
+    def __init__(self):
+        super().__init__(
+            label="Abrir ticket",
+            emoji="📩",
+            style=discord.ButtonStyle.primary,
+            custom_id=TICKET_OPEN_ID
+        )
 
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -1831,17 +1811,16 @@ class OpenTicketButton(discord.ui.Button):
         if guild is None or not isinstance(member, discord.Member):
             return
 
-        # Evitar tickets duplicados del mismo usuario, incluidos los tickets antiguos.
-        ticket_type = self.ticket_type
-        topic = f"{TICKET_TOPIC_PREFIX}{member.id}:{ticket_type}"
+        # Evitar tickets duplicados del mismo usuario.
+        topic = f"{TICKET_TOPIC_PREFIX}{member.id}"
         existing = discord.utils.find(
-            lambda c: get_ticket_owner_id(c) == member.id,
+            lambda c: c.topic == topic,
             guild.text_channels
         )
 
         if existing is not None:
             await interaction.response.send_message(
-                f"Ya tienes un ticket abierto: {existing.mention}. Cierra ese ticket antes de abrir otro.",
+                f"Ya tienes un ticket abierto: {existing.mention}",
                 ephemeral=True
             )
             return
@@ -1904,25 +1883,12 @@ class OpenTicketButton(discord.ui.Button):
 
         try:
             channel = await guild.create_text_channel(
-                name=ticket_channel_name(member, ticket_type),
+                name=ticket_channel_name(member),
                 category=category,
                 overwrites=overwrites,
                 topic=topic,
-                reason=f"Ticket de {ticket_type} abierto por {member}"
+                reason=f"Ticket abierto por {member}"
             )
-
-            if ticket_type == "venta":
-                await channel.send(
-                    f"¡Hola {member.mention}! 🚘 **Solicitud para vender un vehículo a Coutt & Schutz**\n\n"
-                    "Completa los siguientes datos para que nuestro equipo pueda evaluar tu vehículo:\n"
-                    "• **Modelo del vehículo**.\n"
-                    "• **Precio solicitado**.\n"
-                    "• **Otros detalles** (opcional).\n\n"
-                    "Si quieres, puedes enviar fotos del vehículo como mensajes en este mismo ticket; no son obligatorias.\n\n"
-                    "El envío de la solicitud no garantiza que la concesionaria lo compre; "
-                    "el equipo revisará la información y te responderá por este ticket.",
-                    allowed_mentions=discord.AllowedMentions(users=[member])
-                )
 
             await channel.send(
                 view=TicketControlView(
@@ -1964,16 +1930,10 @@ class OpenTicketButton(discord.ui.Button):
             ephemeral=True
         )
 
-        if ticket_type == "venta":
-            log_title = "🚘 Nueva propuesta de venta de vehículo"
-            log_description = "Un usuario abrió una solicitud para vender un vehículo a la concesionaria."
-        else:
-            log_title = "🎫 Nuevo ticket de contacto"
-            log_description = "Se creó un nuevo ticket desde el panel de contacto."
         await log_ticket_event(
             guild,
-            log_title,
-            log_description,
+            "🎫 Nuevo ticket de contacto",
+            "Se creó un nuevo ticket desde el panel de contacto.",
             channel=channel,
             actor=member,
         )
@@ -2012,21 +1972,10 @@ class TicketPanelView(discord.ui.LayoutView):
         ))
         container.add_item(discord.ui.Separator())
 
-        container.add_item(discord.ui.Section(
-            discord.ui.TextDisplay(
-                "### 🚘 Vender un vehículo a la concesionaria\n"
-                "¿Quieres ofrecer tu vehículo a Coutt & Schutz? Abre una solicitud privada "
-                "y envíanos sus datos y fotos para que el equipo pueda evaluarlo."
-            ),
-            accessory=OpenTicketButton(ticket_type="venta")
-        ))
-        container.add_item(discord.ui.Separator())
-
         container.add_item(discord.ui.TextDisplay(
             "**¿En qué podemos ayudarte?**\n"
-            "🔑  Comprar vehículos\n"
+            "🔑  Compra de vehículos\n"
             "💬  Consultas sobre el catálogo\n"
-            "🚘  Ofrecer tu vehículo a la concesionaria\n"
             "🛠️  Cualquier otra duda\n"
             "-# Solo puedes tener un ticket abierto a la vez."
         ))
@@ -2055,7 +2004,7 @@ async def ensure_ticket_panel():
 
             if contains_panel_button(
                 message.components,
-                {TICKET_OPEN_ID, TICKET_SELL_VEHICLE_ID}
+                {TICKET_OPEN_ID}
             ):
                 if current_panel is None:
                     current_panel = message
