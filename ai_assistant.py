@@ -54,7 +54,7 @@ GEMINI_FALLBACK_MODEL = os.getenv(
 )
 GEMINI_ATTEMPTS_PER_MODEL = 2      # intentos por modelo
 GEMINI_RETRY_DELAY_SECONDS = 2.0   # pausa entre intentos
-GEMINI_TOTAL_BUDGET_SECONDS = 100  # margen para reintentos y modelo de respaldo
+GEMINI_TOTAL_BUDGET_SECONDS = 110  # margen para reintentos y modelo de respaldo
 # Errores temporales de Gemini: vale la pena reintentar.
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
@@ -66,7 +66,7 @@ CATALOG_CACHE_SECONDS = 60     # tiempo que se reutiliza el catálogo leído
 ANSWER_CACHE_SECONDS = 600     # tiempo que se reutilizan respuestas iguales
 USER_COOLDOWN_SECONDS = 8      # espera entre preguntas de un mismo usuario
 MAX_QUESTION_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 45   # por intento; Gemini puede tardar con catálogos extensos
+REQUEST_TIMEOUT_SECONDS = 60   # por intento; Gemini puede tardar con catálogos extensos
 
 # Canal interno que solo leen las respuestas para administradores.
 STAFF_CACHE_SECONDS = 60       # tiempo que se reutiliza el canal leído
@@ -95,7 +95,13 @@ SYSTEM_DEALER_PUBLIC = False
 # - Las pruebas de manejo se coordinan por ticket.
 # - Todos los vehículos se entregan con el tanque lleno.
 # """
-DEALERSHIP_EXTRA_INFO = ""
+DEALERSHIP_EXTRA_INFO = """\
+- Métodos de pago: consultar en el ticket.
+- Permutas: consultar en el ticket.
+- Reservas: consultar en el ticket.
+- Entregas: consultar en el ticket.
+- El estado del stock lo actualiza manualmente el personal; no deduzcas disponibilidad si el catálogo no la indica.
+"""
 
 
 def build_system_prompt(used_channel_id, imported_channel_id,
@@ -140,6 +146,10 @@ con cualquier consulta relacionada con la concesionaria.
 
 SOBRE LA CONCESIONARIA:
 {business_info}
+
+Reglas de precisión comercial:
+- Pagos, permutas, reservas y entregas: indicar que se consultan en el ticket.
+- No inventar condiciones ni afirmar disponibilidad si el estado no figura en el catálogo.
 
 Qué puedes responder:
 - Preguntas sobre el catálogo: vehículos disponibles, precios, rangos de \
@@ -309,6 +319,7 @@ def parse_vehicle_message(message):
     Soporta el formato nuevo (contenedor) y el antiguo (embed).
     """
     name = price = category = None
+    status = None
     description_parts = []
 
     texts = []
@@ -320,6 +331,10 @@ def parse_vehicle_message(message):
         # Textos pequeños decorativos (cabecera y pie de la publicación).
         if text.startswith("-#"):
             continue
+
+        status_match = re.search(r"\b(disponible|reservado|vendido)\b", text, re.IGNORECASE)
+        if status_match:
+            status = status_match.group(1).capitalize()
 
         if text.startswith("## ") and name is None:
             name = text[3:].strip()
@@ -352,6 +367,14 @@ def parse_vehicle_message(message):
                     price = value
                 elif "categor" in key:
                     category = value
+                if "estado" in key or "stock" in key:
+                    status_match = re.search(r"\b(disponible|reservado|vendido)\b", value, re.IGNORECASE)
+                    if status_match:
+                        status = status_match.group(1).capitalize()
+            if embed.description:
+                status_match = re.search(r"\b(disponible|reservado|vendido)\b", embed.description, re.IGNORECASE)
+                if status_match:
+                    status = status_match.group(1).capitalize()
             break
 
     if not (name and price):
@@ -363,6 +386,7 @@ def parse_vehicle_message(message):
         "price_value": parse_price(price),
         "category": category or "Sin categoría",
         "description": short(" ".join(description_parts)),
+        "status": status or "Estado no indicado; consultar en ticket",
         "url": message.jump_url,
     }
 
@@ -380,6 +404,7 @@ def format_catalog(vehicles):
         lines.append(
             f"- {v['name']} | Tipo: {v['type']} | "
             f"Categoría: {v['category']} | Precio: {price} | "
+            f"Estado: {v.get('status', 'Estado no indicado; consultar en ticket')} | "
             f"Descripción: {v['description']} | Enlace: {v['url']}"
         )
 
@@ -634,7 +659,7 @@ class AIAssistant(commands.Cog):
                     total=REQUEST_TIMEOUT_SECONDS,
                     connect=10,
                     sock_connect=10,
-                    sock_read=40
+                    sock_read=55
                 )
             )
 
@@ -874,6 +899,9 @@ class AIAssistant(commands.Cog):
 
         except AIError as error:
             return str(error)
+        except Exception:
+            logger.exception("Error inesperado al responder una consulta de IA.")
+            return "Tu consulta no pudo procesarse en este momento. Inténtalo de nuevo en unos segundos o espera al equipo de la concesionaria."
 
     # --------------------------------------------------------
     # Atención automática de tickets + mención tradicional
