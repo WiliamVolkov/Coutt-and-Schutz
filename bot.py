@@ -65,9 +65,12 @@ PANEL_MARKER = "COUTT_SCHUTZ_VEHICLE_PANEL"
 
 # Sistema de tickets.
 TICKET_PANEL_CHANNEL_ID = 1560447380636176525
-# Categoría donde se crean los tickets (opcional). Si es None, se
-# crean en la misma categoría del canal del panel de tickets.
-TICKET_CATEGORY_ID = None
+# Categoría de destino para los tickets creados desde el panel de contacto.
+TICKET_CATEGORY_ID = 1561573807724953620
+# Registro de aperturas y cierres de tickets.
+TICKET_LOG_CHANNEL_ID = 1561573866617184336
+# Foro donde se conserva el historial de los tickets cerrados.
+TICKET_ARCHIVE_FORUM_ID = 1561573909772501042
 # Rol de los trabajadores de la concesionaria: se menciona al abrir un
 # ticket, puede ver el canal y puede cerrarlo.
 TICKET_STAFF_ROLE_ID = 1558775758904893501
@@ -171,9 +174,7 @@ class CouttSchutzBot(commands.Bot):
             ticket_channel_id=TICKET_PANEL_CHANNEL_ID,
             categories=[name for name, _ in VEHICLE_CATEGORIES],
             staff_channel_id=WORKERS_CHANNEL_ID,
-            system_channel_id=SYSTEM_DEALER_CHANNEL_ID,
-            ticket_staff_role_id=TICKET_STAFF_ROLE_ID,
-            ticket_topic_prefix=TICKET_TOPIC_PREFIX
+            system_channel_id=SYSTEM_DEALER_CHANNEL_ID
         )
         # IMPORTANTE: eliminar los comandos registrados en el ámbito del servidor
         # antes de sincronizar los globales. Discord puede mostrar simultáneamente
@@ -1486,6 +1487,125 @@ async def pedido_entregar(interaction: discord.Interaction, numero: app_commands
 load_orders()
 
 
+async def _get_guild_channel(guild, channel_id):
+    """Obtiene un canal por caché o por API, sin dejar caer el evento."""
+    if guild is None or not channel_id:
+        return None
+    channel = guild.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await guild.fetch_channel(channel_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        logger.exception("No se pudo acceder al canal configurado %s.", channel_id)
+        return None
+
+
+async def log_ticket_event(guild, title, description, channel=None, actor=None):
+    """Escribe un evento de ticket en el canal de registro configurado."""
+    log_channel = await _get_guild_channel(guild, TICKET_LOG_CHANNEL_ID)
+    if not isinstance(log_channel, (discord.TextChannel, discord.Thread)):
+        logger.error("El canal de registro de tickets %s no existe o no es un canal de texto.", TICKET_LOG_CHANNEL_ID)
+        return False
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        colour=TICKET_COLOR,
+        timestamp=datetime.now(timezone.utc),
+    )
+    if channel is not None:
+        embed.add_field(name="Ticket", value=f"`{channel.name}` · `{channel.id}`", inline=False)
+        embed.add_field(name="Canal", value=f"[Abrir ticket]({channel.jump_url})", inline=True)
+        owner_id = get_ticket_owner_id(channel)
+        if owner_id:
+            embed.add_field(name="Cliente", value=f"<@{owner_id}> (`{owner_id}`)", inline=True)
+    if actor is not None:
+        embed.add_field(name="Acción realizada por", value=f"{actor.mention} (`{actor.id}`)", inline=False)
+    try:
+        await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        logger.exception("No se pudo publicar en el registro de tickets %s.", TICKET_LOG_CHANNEL_ID)
+        return False
+
+
+async def archive_ticket(channel, closed_by):
+    """Guarda el historial en el foro antes de permitir borrar el ticket."""
+    guild = channel.guild
+    forum = await _get_guild_channel(guild, TICKET_ARCHIVE_FORUM_ID)
+    if not isinstance(forum, discord.ForumChannel):
+        logger.error("El canal de archivo %s no existe o no es un foro.", TICKET_ARCHIVE_FORUM_ID)
+        return False
+
+    try:
+        messages = [message async for message in channel.history(limit=1000, oldest_first=True)]
+        lines = []
+        for message in messages:
+            stamp = message.created_at.strftime("%Y-%m-%d %H:%M UTC")
+            content = (message.content or "").strip()
+            if message.embeds:
+                embed_parts = []
+                for embed in message.embeds:
+                    if embed.title:
+                        embed_parts.append(embed.title)
+                    if embed.description:
+                        embed_parts.append(embed.description)
+                    embed_parts.extend(f"{field.name}: {field.value}" for field in embed.fields)
+                if embed_parts:
+                    content = (content + " | " if content else "") + "[Embed: " + " / ".join(embed_parts) + "]"
+            if message.attachments:
+                attachment_urls = " ".join(a.url for a in message.attachments)
+                content = (content + " | " if content else "") + f"Adjuntos: {attachment_urls}"
+            if message.stickers:
+                content = (content + " | " if content else "") + "Stickers: " + ", ".join(s.name for s in message.stickers)
+            if not content:
+                content = "[Mensaje sin texto]"
+            # Evita que un historial muy grande genere un único mensaje imposible de enviar.
+            lines.append(f"[{stamp}] {message.author} ({message.author.id}): {content}")
+
+        owner_id = get_ticket_owner_id(channel)
+        transcript = "\n".join(lines) or "No se encontraron mensajes en el historial."
+        header = (
+            f"Ticket original: #{channel.name} (`{channel.id}`)\n"
+            f"Cliente: <@{owner_id}>\n" if owner_id else f"Ticket original: #{channel.name} (`{channel.id}`)\n"
+        ) + f"Cerrado por: {closed_by.mention} (`{closed_by.id}`)\nMensajes archivados: {len(messages)}\n\n"
+        chunks = [transcript[i:i + 1700] for i in range(0, len(transcript), 1700)] or [transcript]
+        first_content = header + "```text\n" + chunks[0] + "\n```"
+        if len(first_content) > 1950:
+            first_content = first_content[:1940] + "…"
+        result = await forum.create_thread(
+            name=f"{channel.name} · {channel.id}"[:100],
+            content=first_content,
+            reason=f"Archivo automático del ticket {channel.id}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        archive_thread = getattr(result, "thread", None)
+        if archive_thread is None and isinstance(result, tuple):
+            archive_thread = result[0]
+        if archive_thread is None:
+            logger.error("Discord no devolvió el hilo creado para archivar el ticket %s.", channel.id)
+            return False
+        for index, chunk in enumerate(chunks[1:], start=2):
+            await archive_thread.send(
+                f"**Continuación del historial ({index}/{len(chunks)})**\n```text\n{chunk}```",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        await log_ticket_event(
+            guild,
+            "📦 Ticket archivado",
+            f"El historial se guardó en {archive_thread.mention}.",
+            channel=channel,
+            actor=closed_by,
+        )
+        return True
+    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+        logger.exception("No se pudo archivar el ticket %s; se conservará el canal original.", channel.id)
+        return False
+    except Exception:
+        logger.exception("Error inesperado archivando el ticket %s; se conservará el canal original.", channel.id)
+        return False
+
+
 # ============================================================
 # SISTEMA DE TICKETS
 # ============================================================
@@ -1505,7 +1625,7 @@ class ConfirmCloseButton(discord.ui.Button):
         await interaction.response.edit_message(
             view=notice_view(
                 "🔒 Cerrando ticket",
-                "El canal se eliminará en unos segundos.",
+                "Se guardará el historial en el foro antes de eliminar el canal.",
                 CLOSE_COLOR
             )
         )
@@ -1520,9 +1640,24 @@ class ConfirmCloseButton(discord.ui.Button):
                 ),
                 allowed_mentions=discord.AllowedMentions.none()
             )
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
+            archived = await archive_ticket(self.channel, interaction.user)
+            if not archived:
+                await self.channel.send(
+                    "⚠️ No pude archivar el historial en el foro. El ticket se conserva para evitar perder la conversación. "
+                    "Revisa los permisos del bot y los IDs de registro/archivo.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
             await self.channel.delete(
                 reason=f"Ticket cerrado por {interaction.user}"
+            )
+            await log_ticket_event(
+                self.channel.guild,
+                "🔒 Ticket cerrado",
+                "El canal original se eliminó después de archivar el historial.",
+                channel=self.channel,
+                actor=interaction.user,
             )
             logger.info(
                 "Ticket cerrado: #%s por %s",
@@ -1692,12 +1827,20 @@ class OpenTicketButton(discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Categoría donde se creará el ticket.
-        category = None
-        if TICKET_CATEGORY_ID:
-            category = guild.get_channel(TICKET_CATEGORY_ID)
-        if category is None and interaction.channel is not None:
-            category = getattr(interaction.channel, "category", None)
+        # Los tickets del panel de contacto van siempre a la categoría configurada.
+        category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+        if category is None and TICKET_CATEGORY_ID:
+            try:
+                category = await guild.fetch_channel(TICKET_CATEGORY_ID)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.exception("No se pudo acceder a la categoría de tickets %s.", TICKET_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel):
+            logger.error("La categoría de tickets %s no existe o no es una categoría.", TICKET_CATEGORY_ID)
+            await interaction.followup.send(
+                "No se pudo crear el ticket porque la categoría de contacto no está disponible. Avisa a un administrador.",
+                ephemeral=True,
+            )
+            return
 
         # Solo el usuario, el bot y los administradores pueden ver
         # el canal (los administradores ven todo por su permiso).
@@ -1747,16 +1890,6 @@ class OpenTicketButton(discord.ui.Button):
                 reason=f"Ticket abierto por {member}"
             )
 
-            # La IA saluda primero automáticamente al crear cada ticket nuevo.
-            await channel.send(
-                f"¡Hola {member.mention}! 👋 Soy el asistente virtual de Coutt & Schutz. "
-                "Estoy aquí para ayudarte con consultas sobre vehículos, precios y el proceso "
-                "de compra. Cuéntame qué necesitas y te responderé con la información disponible "
-                "en nuestro catálogo. Si hace falta atención personalizada, el equipo podrá "
-                "continuar la conversación.",
-                allowed_mentions=discord.AllowedMentions(users=[member])
-            )
-
             await channel.send(
                 view=TicketControlView(
                     member,
@@ -1797,6 +1930,13 @@ class OpenTicketButton(discord.ui.Button):
             ephemeral=True
         )
 
+        await log_ticket_event(
+            guild,
+            "🎫 Nuevo ticket de contacto",
+            "Se creó un nuevo ticket desde el panel de contacto.",
+            channel=channel,
+            actor=member,
+        )
         logger.info("Ticket creado: #%s (%s)", channel.name, member)
 
 
