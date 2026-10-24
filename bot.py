@@ -1397,7 +1397,7 @@ class RegisterOrderButton(discord.ui.Button):
 @bot.tree.command(name="anunciar_actualizacion", description="Publica el anuncio de las últimas actualizaciones de Coutt & Schutz.")
 @app_commands.describe(canal="Canal público donde se publicará el anuncio")
 async def anunciar_actualizacion(interaction: discord.Interaction, canal: discord.TextChannel):
-    """Publica un anuncio de novedades visible para los clientes."""
+    """Publica el anuncio como un mensaje de texto normal, no como embed."""
     if not (interaction.user.guild_permissions.administrator or is_ticket_staff(interaction.user)):
         await interaction.response.send_message(
             "Solo la administración o el equipo autorizado de Coutt & Schutz puede publicar este anuncio.",
@@ -1405,65 +1405,62 @@ async def anunciar_actualizacion(interaction: discord.Interaction, canal: discor
         )
         return
 
-    embed = discord.Embed(
-        title="📢 Actualización de Coutt & Schutz",
-        description=(
-            "Hemos incorporado nuevas opciones y mejoras para que puedas gestionar tus consultas "
-            "y propuestas de forma más sencilla."
-        ),
-        colour=discord.Colour.from_rgb(212, 175, 55),
-        timestamp=datetime.now(timezone.utc)
+    anuncio = (
+        f"<@&{PUBLIC_ROLE_ID}>\n\n"
+        "# 🛠️ COUTT & SCHUTZ — ACTUALIZACIÓN DEL SISTEMA\n\n"
+        "¡Buenas a todos! Informamos que se han implementado nuevas funciones y correcciones en Coutt & Schutz "
+        "para mejorar la experiencia de nuestros clientes.\n\n"
+        "## 🚘 1. Presentación de vehículos para venta\n\n"
+        "Ahora puedes ofrecer tu vehículo a Coutt & Schutz desde el panel de tickets.\n"
+        "• **Acceso:** pulsa **Presentar vehículo para venta** en el panel de tickets.\n"
+        "• **Modelo:** indica qué vehículo deseas ofrecer.\n"
+        "• **Precio solicitado:** indica cuánto esperas recibir.\n"
+        "• **Otros detalles (opcional):** añade información que ayude a evaluar la propuesta.\n"
+        "• **Fotografías opcionales:** si lo deseas, puedes adjuntar imágenes directamente en el ticket.\n\n"
+        "Una vez enviada la propuesta, el equipo la revisará y te responderá a través del mismo ticket. "
+        "Presentar una propuesta no garantiza que la concesionaria compre el vehículo.\n\n"
+        "## 🎫 2. Mejoras en el sistema de tickets\n\n"
+        "• Se aclararon las indicaciones del proceso de venta.\n"
+        "• Se realizaron ajustes al sistema de solicitudes.\n"
+        "• Se mantiene la atención privada mediante tickets para gestionar las consultas con el equipo.\n\n"
+        "## 🛠️ 3. Correcciones y mejoras generales\n\n"
+        "Se aplicaron correcciones generales a las herramientas para clientes.\n\n"
+        "### 📌 ¿Cómo utilizar la nueva función?\n\n"
+        "1. Entra en el canal de atención al cliente.\n"
+        "2. Pulsa **Presentar vehículo para venta**.\n"
+        "3. Indica el modelo y el precio solicitado; los detalles adicionales son opcionales.\n"
+        "4. Envía tu propuesta y espera la respuesta del equipo.\n\n"
+        "Gracias por confiar en **Coutt & Schutz**. Seguimos mejorando nuestros servicios.\n\n"
+        "**Coutt & Schutz · Tu próximo vehículo comienza aquí.** 🏁"
     )
-    embed.add_field(
-        name="🚘 Presentar un vehículo para venta",
-        value=(
-            "Ahora puedes abrir una solicitud para que Coutt & Schutz evalúe la posible compra de tu vehículo. "
-            "Desde el panel de tickets, selecciona **Presentar vehículo para venta**."
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📝 Información de la propuesta",
-        value=(
-            "Indica el **modelo** y el **precio solicitado**. También puedes añadir **otros detalles** de forma opcional, "
-            "por ejemplo, el año, el estado o las modificaciones del vehículo."
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🖼️ Fotografías opcionales",
-        value=(
-            "Si quieres complementar la propuesta, puedes adjuntar fotos directamente en el ticket. "
-            "No son obligatorias."
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🛠️ Correcciones y mejoras",
-        value=(
-            "También se han ajustado las indicaciones del proceso de venta y realizado correcciones en el sistema de tickets "
-            "para mejorar la claridad y el uso de los servicios de la concesionaria."
-        ),
-        inline=False
-    )
-    embed.set_footer(text="Coutt & Schutz • La recepción de una propuesta no garantiza la compra del vehículo.")
 
     try:
-        await canal.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await canal.send(
+            anuncio,
+            allowed_mentions=discord.AllowedMentions(
+                roles=[discord.Object(id=PUBLIC_ROLE_ID)],
+                users=False,
+                everyone=False,
+                replied_user=False
+            )
+        )
     except discord.Forbidden:
         await interaction.response.send_message(
-            "No tengo permiso para enviar mensajes o insertar enlaces en ese canal. Revisa mis permisos e inténtalo de nuevo.",
+            "No tengo permiso para enviar mensajes en ese canal. Revisa mis permisos e inténtalo de nuevo.",
             ephemeral=True
         )
         return
-    except discord.HTTPException:
+    except discord.HTTPException as exc:
         await interaction.response.send_message(
-            "Discord no permitió publicar el anuncio. Inténtalo nuevamente en unos minutos.",
+            f"Discord no permitió publicar el anuncio (error {exc.status}). Inténtalo nuevamente.",
             ephemeral=True
         )
         return
 
-    await interaction.response.send_message(f"Anuncio de actualización publicado en {canal.mention}.", ephemeral=True)
+    await interaction.response.send_message(
+        f"Anuncio de actualización publicado como mensaje de texto en {canal.mention}.",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="pedido", description="Abre el formulario para registrar un vehículo por encargo en este ticket.")
